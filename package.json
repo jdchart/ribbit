@@ -1,0 +1,29 @@
+{
+  "name": "ribbit",
+  "version": "0.1.0",
+  "description": "A JSON-patchable Web Audio live-coding engine: tracks, synths, processors, buses, modulators, and patches on a shared looping clock, drivable by slash-commands and serializable to JSON.",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "main": "./src/index.js",
+  "module": "./src/index.js",
+  "files": [
+    "src",
+    "docs",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "keywords": [
+    "web-audio",
+    "audio",
+    "live-coding",
+    "synthesizer",
+    "music",
+    "modular"
+  ],
+  "scripts": {
+    "check": "node --check src/index.js"
+  }
+}
