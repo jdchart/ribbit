@@ -184,7 +184,7 @@ destination).
 lfo1: A low-frequency oscillator: a continuous bipolar (-1..1) control signal at a given rate, for patching into any parameter. [freq=2.000]
 ```
 
-See [objects.md](objects.md#modulators) for available modulator types and their params.
+See [objects.md](objects.md#modulators-type-on-add_modulator) for available modulator types and their params.
 
 ## Buses and sends
 
@@ -228,10 +228,13 @@ that was feeding into it, the same way removing a patch's endpoint does.
 
 ## Modulators and patches
 
-A **modulator** is a standalone, continuously-running control source (e.g.
-an `lfo`, a low-frequency oscillator) — it's created and addressed just like
-a processor, but it never sits in any channel's signal chain. It only
-matters once you **patch** it somewhere:
+A **modulator** is a standalone control source — created and addressed just
+like a processor, but it never sits in any channel's signal chain. Three
+types ship: `lfo` (a low-frequency oscillator, the default), `cv` (a held
+value you set/ramp yourself), and `randomnotes` (which generates notes
+rather than a signal — see [below](#event-generating-modulators-patching-notes-into-a-synth)).
+Full reference: [objects.md](objects.md#modulators-type-on-add_modulator).
+A modulator only matters once you **patch** it somewhere:
 
 ```
 /add_modulator type=lfo freq=2 name=lfo1
@@ -273,7 +276,7 @@ outlives what it was connected to.
 ### Event-generating modulators: patching notes into a synth
 
 A modulator that **generates discrete notes** (currently just `randomnotes` —
-see [objects.md](objects.md#modulators)) instead of a continuous signal can be
+see [objects.md](objects.md#modulators-type-on-add_modulator)) instead of a continuous signal can be
 patched straight into a track's control input, alongside — not instead of —
 anything you `add_event`'d by hand:
 

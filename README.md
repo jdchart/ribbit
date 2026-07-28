@@ -53,6 +53,12 @@ const track = engine.createTrack({ name: "bass", synth: "oscsynth" });
 import { sessionToJSON } from "ribbit";
 const json = sessionToJSON(engine);
 loadSession(engine, json);
+
+// When the host is done with it (a component unmounting, a page navigating
+// away), tear it down. `stop()` only pauses; nothing collects an AudioContext
+// or the clock's timer loop just because you dropped your last reference, so
+// without this the session keeps playing.
+await engine.dispose();
 ```
 
 `AudioContext` doesn't exist during server-side rendering, so construct `Ribbit`
@@ -71,7 +77,8 @@ The same three-audience structure the rest of the workspace uses:
 - **[docs/user](docs/user/)** — the command and object reference: what you can
   create and control, and the full slash-command vocabulary.
 - **[docs/dev](docs/dev/)** — architecture, a source walkthrough, and tutorials
-  for extending the engine (new synths, processors, modulators, commands).
+  for extending the engine (new synths, processors, modulators, commands) or
+  [removing a type](docs/dev/removing-a-type.md) again.
 - **[docs/llm](docs/llm/)** — concise, context-window-friendly summaries meant
   to be fed to an LLM instead of the full source.
 

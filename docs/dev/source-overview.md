@@ -278,6 +278,19 @@ an `RibbitParam` wrapping
 `osc.frequency`; `get freq()` is the same kind of thin alias as a processor's
 `get wet()`.
 
+## `modulators/cv.js` — `RibbitCV extends RibbitModulator`
+
+The minimal modulator, and useful as the reference for what the base class
+actually requires: a `ConstantSourceNode` into `this.output`, one
+`RibbitParam` (`params.value`) wrapping its `offset`, and nothing else — no
+per-tick work, no `generateEvents`, no options. Because nothing moves on its
+own, every change comes through the ordinary param path (instant set, ramp,
+`at=` deferral, `automate=`), which is exactly what makes it read as "CV"
+rather than a second LFO. `params.value` is deliberately given no `min`/`max`
+(unlike `lfo`'s `freq`), on the same reasoning as a patch's `depth`: the
+patch scales it per-destination, so clamping here would be an arbitrary cap.
+`get value()` is the usual thin alias onto the underlying `AudioParam`.
+
 ## `modulators/randomnotes.js` — `RibbitRandomNotes extends RibbitModulator`
 
 The event-generating counterpart to `RibbitLFO` — see
@@ -510,6 +523,18 @@ The top-level object and factory/registry hub:
   idea for sends: it walks every track, bus, and master and removes any send
   whose `destination` is the object being torn down, so a send never
   outlives the channel it fed into.
+- `start()`/`stop()`/`dispose()` — the lifecycle trio. `start`/`stop` back
+  the `/start` and `/stop` commands and only resume/suspend: `stop` leaves
+  everything built and restartable. `dispose()` is the one-way version, for a
+  host discarding the engine entirely (a UI unmounting, a page navigating
+  away): it `stop()`s, calls the duck-typed `dispose?.()` on every live synth
+  and modulator, then `close()`s the `AudioContext`, returning that promise.
+  It exists because **neither the context nor the clock is reachable by
+  garbage collection** — the `AudioContext` is owned by the browser's audio
+  thread, and `RibbitClock._tick` reschedules itself with `setTimeout`
+  forever — so dropping the last JS reference to a `Ribbit` stops nothing.
+  A host that unmounts without calling this leaves the session audibly
+  playing (see `SessionPage.svelte`'s `onMount` cleanup in the reference app).
 - `_uniqueName(base)` — validates `base` as an addressable name (must parse
   as a `/name` token: letters/digits/`_`, starting with a letter or `_` — no
   dots, which would collide with the `name.param` patch-destination syntax),

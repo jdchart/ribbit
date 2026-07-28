@@ -53,8 +53,10 @@ get(), set(value), choices? } }`. One declaration makes it console-settable
 (`/mod1 waveform=square`, validated against `choices`; ramp specs
 rejected), lists it in `help`, and round-trips it through
 `/save_session`/`/recall` — the base `getOptions()` derives from the map,
-so don't override it. See `modulators/lfo.js`/`randomnotes.js` for the two
-real examples.
+so don't override it. Three real examples in tree: `modulators/cv.js` is the
+smallest (a `ConstantSourceNode`, one unbounded param, no options — start
+here), `lfo.js` adds an option and a bounded param, `randomnotes.js` is the
+event-generating shape below.
 
 A modulator can instead generate discrete events (notes) rather than a
 continuous signal — see `modulators/randomnotes.js` (`RibbitRandomNotes`) for

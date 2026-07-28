@@ -32,6 +32,16 @@ Ribbit                         top-level owner, one per page
 └── states: {name: snapshot}      named snapshots captured by /save, applied by /recall (session.js)
 ```
 
+Lifecycle: `start()`/`stop()` resume/suspend the context and start/stop the
+clock (what `/start` and `/stop` call); `dispose()` is the permanent
+counterpart, for a host discarding the engine — it stops the clock, calls the
+duck-typed `dispose()` on every live synth/modulator, and `close()`s the
+`AudioContext`, returning that promise. It matters because neither the context
+nor the clock's self-rescheduling `setTimeout` is owned by the object graph:
+dropping the last reference to a `Ribbit` does *not* stop it making sound, so
+a host that unmounts without calling `dispose()` leaves the session audibly
+running (this is exactly what `SessionPage.svelte`'s `onMount` cleanup is for).
+
 - **`RibbitChannel`** (base of `master`, every `RibbitTrack`, and every bus): fader
   (`params.gain`, 0–1 position tapered onto the actual gain), pan (`params.pan`,
   -1..1), an ordered insert chain of processors, and a `sends` array — every
@@ -56,10 +66,14 @@ Ribbit                         top-level owner, one per page
   in a channel's signal chain (no per-event trigger). Has `input`/`output`
   GainNodes, `params` (`{name: RibbitParam}`) as its console-facing control
   surface, and `active` as a *routing bypass* (handled by the owning channel).
-- **`RibbitModulator`** (base of `RibbitLFO`, `RibbitRandomNotes`): a control
-  source, structurally a processor's sibling (`params`, no per-event trigger)
-  but never joins a channel's chain — it exists only to be patched somewhere.
-  Two shapes: a **continuous** modulator (`RibbitLFO`) has a bipolar (`-1..1`-
+- **`RibbitModulator`** (base of `RibbitLFO`, `RibbitCV`, `RibbitRandomNotes`): a
+  control source, structurally a processor's sibling (`params`, no per-event
+  trigger) but never joins a channel's chain — it exists only to be patched
+  somewhere.
+  Two shapes: a **continuous** modulator (`RibbitLFO`, `RibbitCV` — the
+  latter a `ConstantSourceNode` holding one unbounded, rampable/automatable
+  `value` that never moves on its own, the minimal implementation of the base
+  class) has a bipolar (`-1..1`-
   ish) `output` patched via `RibbitPatch` into an `AudioParam`, with a patch's
   own `depth` deciding how hard it pushes; an **event-generating** modulator
   (`RibbitRandomNotes`) instead implements `generateEvents(fromBeat, toBeat)`
@@ -188,7 +202,7 @@ their own) is the whole-session (de)serialization layer:
   `createModulator`/`createPatch` the console itself uses. Order: buses/
   tracks (throwaway default send) → real sends once every destination name
   exists → modulators → patches last (name-resolved against everything
-  already built). Backs `/load_session` and `/code-editor/demo`'s auto-load
+  already built). Backs `/load_session` and `/code-editor/<slug>`'s auto-load
   (same call, just fed a `fetch()`ed static JSON instead of a picked file).
 - `applySnapshot(nllc, snapshot, { startTime, durationSeconds })` — the
   diff-and-ramp engine behind `/recall`: matched objects (by `.name`, and
@@ -315,13 +329,19 @@ otherwise silent).
 instance (created client-side only, in `onMount`, since `AudioContext` needs
 a browser) and the `{ executeCommand, suggest }` pair from
 `createCommandRouter(nllc)`. Two route pages are both thin wrappers around
-it, differing only in an optional `demoSessionUrl` prop:
+it, differing only in an optional `sessionUrl` prop:
 `routes/code-editor/+page.svelte` (`<SessionPage />`, a blank session) and
-`routes/code-editor/demo/+page.svelte` (`<SessionPage
-demoSessionUrl="/sessions/demo.json" />`, which `fetch()`es that static JSON
+`routes/code-editor/[session]/+page.svelte` (`<SessionPage
+sessionUrl="/sessions/<slug>.json" />`, which `fetch()`es that static JSON
 once the engine exists and calls `session.js`'s `loadSession` on it — the
-same call `/load_session` makes with a picked file, minus the file picker).
-`routes/+page.svelte` (the homepage) links to both and hosts an audio-options
+same call `/load_session` makes with a picked file, minus the file picker;
+a missing/unparseable file leaves an empty session and shows a banner).
+The slug isn't validated against a file list, so any `.json` dropped into
+`static/sessions/` gets a route for free.
+`routes/+page.svelte` (the homepage) links to the blank session, offers a
+dropdown of every session in `static/sessions/` (enumerated server-side by
+`+page.server.js`, which also parses each to show a one-line summary — a
+browser can't list a static directory over HTTP), and hosts an audio-options
 panel (output device via `navigator.mediaDevices`/`AudioContext.setSinkId`,
 `AudioContext`'s `latencyHint`) that writes two `localStorage` keys
 (`nllc:audioOutputDeviceId`, `nllc:audioLatencyHint`) — it never constructs
@@ -437,6 +457,13 @@ and do nothing.
   completes silently no-ops (also true after a runtime `samples=` swap).
 - `splitCommands` (multi-command-per-line) assumes no param value contains a
   literal `/`; none currently do, but a value that did would be mis-split.
+- `dispose()` stops the clock and closes the context, but `automation.js`'s
+  `scheduleAt` (deferred structural work — `applySnapshot`'s create/remove/
+  reorder, `/clock num_beats= at=`) fires a bare untracked `setTimeout` that
+  nothing cancels. A `/recall` or deferred `num_beats` still in flight when
+  the engine is disposed will run its callback against a closed context.
+  Fixing it would mean tracking those timer ids on the `Ribbit` (or handing
+  `scheduleAt` an abort signal); nothing does today.
 - Ramping/deferred `at=` scheduling/loop automation on a multi-node param
   (`RibbitDelay`'s `time`/`feedback`) only animates the "primary" node
   directly — the other node (e.g. delay's R side) only gets updated

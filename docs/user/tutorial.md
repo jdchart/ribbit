@@ -10,19 +10,21 @@ shared clock — like a very small, text-driven Ableton/Max-MSP.
 The commands below are exactly what `createCommandRouter(engine)` accepts, so any
 host app with a text console will do. The reference host app in this workspace is
 **nllc** — see its [docs](../../../nllc/docs/) to start it (`npm run dev`) and open
-its console. It ships two sessions built on the same console+mixer page:
+its console. Its homepage offers the same console+mixer page two ways:
 
 - **Blank session** — starts from nothing but the master channel. This is where the
   rest of this tutorial happens.
-- **Demo session** — the same page, but it auto-loads a saved session on open: a
-  couple of tracks, a reverb bus, an LFO patched into it, and a couple of saved
-  states to `/recall` between. Open this one first if you just want to hear
-  something immediately, or as a worked example to read once you've been through
-  this tutorial — `/tracks`, `/buses`, `/modulators`, `/patches`, and `/states` all
-  show you what it's made of.
+- **A saved session**, picked from a dropdown of everything the app has on disk.
+  The one that ships, `demo`, auto-loads a couple of tracks, a reverb bus, an LFO
+  patched into it, and a couple of saved states to `/recall` between. Open this
+  one first if you just want to hear something immediately, or as a worked
+  example to read once you've been through this tutorial — `/tracks`, `/buses`,
+  `/modulators`, `/patches`, and `/states` all show you what it's made of.
+  Anything you later `/save_session` can be dropped in beside it and picked the
+  same way.
 
-(Output-device/latency options, the mixer pane, and the demo routes are the host
-app's concern — the nllc docs cover them. Everything below is pure engine.)
+(Output-device/latency options, the mixer pane, and the session routes are the
+host app's concern — the nllc docs cover them. Everything below is pure engine.)
 
 ## Your first sounds
 
@@ -373,9 +375,24 @@ a patch's depth later, or remove it, without touching the modulator itself:
 ```
 
 A modulator's own params are rampable exactly like a processor's — `/lfo1
-freq=8 3` glides its rate from 2Hz to 8Hz over 3 seconds. See
+freq=8 3` glides its rate from 2Hz to 8Hz over 3 seconds.
+
+Not every modulator has to move by itself. A `cv` is a modulator with no
+waveform and no rate — just a held `value` you set or ramp yourself:
+
+```
+/add_modulator type=cv name=cv1
+/patch source=cv1 dest=reverb.wet depth=0.5
+/patch source=cv1 dest=track_1.pan depth=0.8
+/cv1 value=1 8b
+```
+
+That last line sweeps *both* destinations from one command, each scaled by
+its own patch depth — a single control moving several things at once, which
+is what patch cables are for. See
 [commands.md](commands.md#modulators-and-patches) for the full reference, and
-[objects.md](objects.md#modulators) for available modulator types.
+[objects.md](objects.md#modulators-type-on-add_modulator) for every modulator
+type.
 
 ## Algorithmic notes: event-generating modulators
 
@@ -406,7 +423,7 @@ touches the authored ones. Tune it live like any other param:
 
 `/unpatch id=<id>` (or `/rand1 remove_self`) stops it. See
 [commands.md](commands.md#event-generating-modulators-patching-notes-into-a-synth)
-and [objects.md](objects.md#modulators) for the full reference.
+and [objects.md](objects.md#modulators-type-on-add_modulator) for the full reference.
 
 ## The mixer
 

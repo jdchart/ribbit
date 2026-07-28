@@ -126,6 +126,26 @@ export class Ribbit {
         this.running = false;
     };
 
+    // Permanent teardown, for a host that's discarding this engine (a UI
+    // unmounting, a page navigating away). Distinct from stop(), which only
+    // pauses: nothing here is meant to be restarted afterwards.
+    //
+    // Both halves matter. The AudioContext is what's actually making sound,
+    // and it belongs to the browser, not to this object — dropping the last
+    // reference to a Ribbit does *not* collect it, so audio keeps playing
+    // until it's explicitly closed. The clock is a self-rescheduling
+    // setTimeout loop, which likewise keeps firing (and would then be
+    // scheduling against a closed context) until stopped. Returns close()'s
+    // promise for a caller that wants to await the teardown.
+    dispose() {
+        this.stop();
+        // Same duck-typed hook removeTrack/removeModulator use for a single
+        // object; here it covers everything still alive at teardown.
+        for (const track of this.tracks) track.source?.dispose?.();
+        for (const modulator of this.modulators) modulator.dispose?.();
+        return this.audioContext.close();
+    };
+
     // Every name currently addressable as /name (excluding "master", which
     // lives in RESERVED_NAMES) — tracks, buses, processors, and modulators
     // share ONE namespace, since the console router dispatches a bare /name

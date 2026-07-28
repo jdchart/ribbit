@@ -10,11 +10,12 @@ exist during SSR).
 
 ```
 routes/+layout.svelte                   theme.css / reset.css, favicon — global chrome only
-routes/+page.svelte                     links to both session routes below, plus an audio-options
+routes/+page.svelte                     blank-session link + a dropdown of every static/sessions/*.json
+│                                         (listed by +page.server.js), plus an audio-options
 │                                         panel (output device / latency hint) that only ever writes
 │                                         to localStorage — this page never touches AudioContext itself
 routes/code-editor/+page.svelte         <SessionPage /> — a blank session
-routes/code-editor/demo/+page.svelte    <SessionPage demoSessionUrl="/sessions/demo.json" />
+routes/code-editor/[session]/+page.svelte   <SessionPage sessionUrl="/sessions/<slug>.json" />
 SessionPage.svelte                      owns the Ribbit instance + executeCommand; top-level layout
 ├── CodeEditor.svelte                   text input + scrollback log; calls onCommand(text) prop;
 │                                        owns command history (↑/↓) and exposes insertAtCursor(text)
@@ -34,13 +35,17 @@ the `Ribbit` instance and its `createCommandRouter`-produced
 `executeCommand`/`suggest` functions live; they're passed down as props
 (`onCommand`/`onSuggest` on `CodeEditor`). Both route pages are thin
 wrappers around it — a session route is never anything more than "which
-`demoSessionUrl`, if any, to hand it" — so the two routes can't drift apart
+`sessionUrl`, if any, to hand it" — so the two routes can't drift apart
 in layout/polling logic, only in which JSON (if any) gets loaded once the
-engine exists. Neither route hand-authors demo content of its own anymore;
-`/code-editor/demo` just `fetch()`es `static/sessions/demo.json` and calls
-`session.js`'s `loadSession` on it once the engine's constructed — exactly
-what `/load_session` does with a picked file, minus the file picker (see
-`session.js` in [source-overview.md](source-overview.md#sessionjs)).
+engine exists. Neither route hand-authors content of its own;
+`/code-editor/<slug>` just `fetch()`es `static/sessions/<slug>.json` and
+calls `session.js`'s `loadSession` on it once the engine's constructed —
+exactly what `/load_session` does with a picked file, minus the file picker
+(see `session.js` in [source-overview.md](source-overview.md#sessionjs)).
+Because the slug is taken straight from the URL rather than checked against
+a list, dropping a new file into `static/sessions/` is all it takes to give
+it a route; a slug with no matching file opens an empty session and says so
+in a banner.
 `SessionPage` also owns a `requestAnimationFrame` poll loop that diffs each
 of `nllc.tracks`, `nllc.buses`, `nllc.modulators`, and `nllc.patches`
 against its own last copy **by element identity** (length + per-index

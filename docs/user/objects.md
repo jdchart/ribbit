@@ -98,10 +98,15 @@ lines that feed back into *each other* (ping-pong) rather than themselves.
 
 ## Modulators (`type=` on `/add_modulator`)
 
-A modulator is a standalone, continuously-running control source — created
-and addressed like a processor, but it never joins any channel's chain. On
-its own it does nothing audible; it only matters once patched into a
-parameter with `/patch` — see [commands.md](commands.md#modulators-and-patches).
+A modulator is a standalone control source — created and addressed like a
+processor, but it never joins any channel's chain. On its own it does
+nothing audible; it only matters once patched into a parameter with
+`/patch` — see [commands.md](commands.md#modulators-and-patches).
+
+There are three, in two shapes. `lfo` and `cv` both produce a **continuous
+signal** patched into a parameter (`lfo` moves by itself, `cv` holds
+whatever you set); `randomnotes` instead generates **discrete notes** and
+patches into a track's synth rather than a parameter.
 
 ### `lfo` — `RibbitLFO` (default)
 
@@ -115,6 +120,33 @@ parameter with `/patch` — see [commands.md](commands.md#modulators-and-patches
 
 `/add_modulator type=lfo freq=2 name=lfo1` then `/patch source=lfo1
 dest=reverb.wet depth=0.2` wobbles `reverb`'s wet mix at 2Hz.
+
+### `cv` — `RibbitCV`
+
+> A generic control-voltage source: a held value (no waveform, no rate) you
+> set, ramp, or automate — the modular equivalent of a manual offset knob or
+> a sample-and-hold's output.
+
+The odd one out: `lfo` moves on its own, `cv` never does. Its output only
+changes when you tell it to, which makes it useful for two things an `lfo`
+can't do — **holding an offset** on a patched parameter, and **driving
+several destinations from one control** (patch the same `cv` into three
+places at different depths, then move all three with one command).
+
+| Constructor option | Default | Runtime param | Meaning |
+|---|---|---|---|
+| `value` | `0` | `value` | The held output level. Rampable and deferrable (`value=1 4b`, `value=0 at=cycle`) and a valid `automate=` target like any other param. Deliberately **unbounded** — real control voltage has no fixed range, and a patch's own `depth` is what scales it for a given destination. |
+
+```
+/add_modulator type=cv name=cv1 value=0.5
+/patch source=cv1 dest=reverb.wet depth=0.4
+/cv1 value=1 8b              # ramp every destination it feeds, over 8 beats
+```
+
+Because a patch *adds* to the destination's own value rather than replacing
+it (see [commands.md](commands.md#modulators-and-patches)), a `cv` at `0`
+does nothing — it's the resting position, not an "off" switch. Negative
+values are legal and push the destination the other way.
 
 ### `randomnotes` — `RibbitRandomNotes`
 
