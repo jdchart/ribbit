@@ -66,9 +66,28 @@ in the browser only (e.g. inside `onMount` in a SvelteKit app).
 
 ### Samples
 
-The built-in `sampler` synth fetches sample files from the host's `/samples/`
-path — the host app is responsible for serving them there (e.g. SvelteKit's
-`static/samples/`).
+The built-in `sampler` and `percsampler` synths fetch sample files from the
+host's `/samples/` path — the host app is responsible for serving them there
+(e.g. SvelteKit's `static/samples/`).
+
+`percsampler` additionally builds its kit by picking at random from the host's
+library, and a browser can't list a directory over HTTP, so it expects a
+manifest at `/samples/manifest.json` (overridable per instance via the
+`manifest_url` option):
+
+```json
+{
+  "kicks":  ["kicks/kick01.wav", "kicks/kick02.wav"],
+  "snares": ["snares/snare01.wav"],
+  "hats":   ["hats/hat01.wav"],
+  "percs":  ["percs/perc01.wav"]
+}
+```
+
+Each entry is a path relative to that same `/samples/` prefix. Serving it is
+the host's job — `nllc` generates it on request from `static/samples/`. A host
+that serves no manifest gets an empty kit and a console warning, not an
+error.
 
 ## Documentation
 
@@ -91,8 +110,11 @@ Import surface (see [`src/index.js`](src/index.js)):
 - **Session** — `loadSession`, `sessionToJSON`, `snapshotSession`, `applySnapshot`
 - **Harmony** — `createHarmonyContext`, `parseDegreeList`, `resolveDegree`
 - **Primitives & base classes** — `RibbitChannel`, `RibbitTrack`, `RibbitClock`,
-  `RibbitParam`, `RibbitEvent`, `RibbitSynth`, `RibbitProcessor`,
-  `RibbitModulator`, `RibbitPatch`, `RibbitEventPatch`, plus the `automation`/
-  `taper` helpers
-- **Built-in types** — `RibbitOscSynth`, `RibbitSampler`, `RibbitReverb`,
-  `RibbitDelay`, `RibbitLFO`, `RibbitRandomNotes`, `RibbitCV`
+  `RibbitParam`, `RibbitParamSources`, `RibbitEvent`, `RibbitSynth`,
+  `RibbitProcessor`, `RibbitModulator`, `RibbitPatch`, `RibbitEventPatch`,
+  plus the `automation`/`taper` helpers
+- **Built-in types** — `RibbitOscSynth`, `RibbitSampler`, `RibbitPercSampler`
+  (plus `PERC_CATEGORIES`), `RibbitReverb`, `RibbitDelay`, `RibbitLFO`,
+  `RibbitRandomNotes`, `RibbitCV`, `RibbitMarkovPercs`, `RibbitEuclidPercs`.
+  See [docs/llm/catalog.md](docs/llm/catalog.md) for each one's params and
+  options on a single page.

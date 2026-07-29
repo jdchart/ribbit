@@ -1,5 +1,5 @@
 import { RibbitModulator } from "../modulator.js";
-import { RibbitParam } from "../param.js";
+import { RibbitParamSources } from "../param.js";
 import { RibbitEvent } from "../event.js";
 import { parseDegreeList } from "../harmony.js";
 
@@ -36,31 +36,18 @@ export class RibbitRandomNotes extends RibbitModulator {
             },
         };
 
-        // probability/min_gap still ride real AudioParams (via a silent
-        // ConstantSourceNode per param) purely so they get the exact same
-        // get/set/ramp/at= machinery every other param has (applyParams in
-        // commands.js) — e.g. `/rand1 probability=0.9 4b` — rather than a
-        // second, param-shaped-but-not-really config surface. Each is routed
-        // through a muted (gain 0) sink into audioContext.destination —
-        // Web Audio quirk: a node with literally no path into the rendered
-        // graph can have scheduled automation (setValueAtTime, which every
-        // deferred/at= set or /recall ride — see automation.js's setInstant)
-        // silently never reflected back in later .value reads, even though a
-        // *direct* .value= assignment (like the line above) always works.
-        // Routed-but-silent keeps it live without ever being audible.
-        this._probabilitySource = audioContext.createConstantSource();
-        this._probabilitySource.offset.value = Math.min(1, Math.max(0, probability));
-        this._probabilitySource.start();
-        this._silentSink(audioContext, this._probabilitySource);
-
-        this._minGapSource = audioContext.createConstantSource();
-        this._minGapSource.offset.value = Math.max(0.0625, min_gap);
-        this._minGapSource.start();
-        this._silentSink(audioContext, this._minGapSource);
-
+        // probability/min_gap still ride real AudioParams purely so they get
+        // the exact same get/set/ramp/at= machinery every other param has
+        // (applyParams in commands.js) — e.g. `/rand1 probability=0.9 4b` —
+        // rather than a second, param-shaped-but-not-really config surface.
+        // Neither has a node in the audio graph to hang off, so both are
+        // backed by silent ConstantSourceNodes; see RibbitParamSources in
+        // param.js for the Web Audio quirk that makes the muted sink
+        // necessary.
+        this._paramSources = new RibbitParamSources(audioContext);
         this.params = {
-            probability: new RibbitParam(this._probabilitySource.offset, { min: 0, max: 1 }),
-            min_gap: new RibbitParam(this._minGapSource.offset, { min: 0.0625, max: 16 }),
+            probability: this._paramSources.create(probability, { min: 0, max: 1 }),
+            min_gap: this._paramSources.create(min_gap, { min: 0.0625, max: 16 }),
         };
 
         // Channels (tracks) currently patched into this modulator's .notes —
@@ -106,23 +93,12 @@ export class RibbitRandomNotes extends RibbitModulator {
         this._nextCandidateBeat = undefined;
     };
 
-    // See the constructor comment above — a muted (gain 0) path into
-    // audioContext.destination keeps `source`'s AudioParam automation live.
-    // Tracked in this._sinks so dispose() can tear it down again.
-    _silentSink(audioContext, source) {
-        const sink = audioContext.createGain();
-        sink.gain.value = 0;
-        source.connect(sink).connect(audioContext.destination);
-        (this._sinks ??= []).push(sink);
-    };
-
     // Called by Ribbit.removeModulator (duck-typed, like generateEvents above)
-    // so the silent destination-routed sinks above don't outlive this
-    // modulator — ribbit.removeModulator's own generic `output.disconnect()`
-    // never touches them, since they're not on this.output.
+    // so the silent destination-routed sinks behind probability/min_gap don't
+    // outlive this modulator — removeModulator's own generic
+    // `output.disconnect()` never touches them, since they're not on
+    // this.output.
     dispose() {
-        this._probabilitySource.stop();
-        this._minGapSource.stop();
-        for (const sink of this._sinks ?? []) sink.disconnect();
+        this._paramSources.dispose();
     };
 };

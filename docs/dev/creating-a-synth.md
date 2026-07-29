@@ -1,5 +1,12 @@
 # Creating a synth
 
+> **Before you start:** [`../llm/catalog.md`](../llm/catalog.md) lists every
+> synth, processor and modulator already in the engine with its params and
+> options, plus a "which one to copy" table. It's the quickest way to find the
+> closest existing synth to model yours on. **Remember to add your new synth
+> to it** once it works — that catalog is what later readers consult instead of
+> the source tree.
+
 A synth is anything that extends `RibbitSynth`, implements `trigger()`, and connects
 its sound-producing nodes into `this.output` (a `GainNode` the base class already
 creates for you).

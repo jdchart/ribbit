@@ -3,6 +3,12 @@
 Full tutorial with rationale: `docs/dev/creating-a-modulator.md`. This is the
 condensed recipe.
 
+**Read `docs/llm/catalog.md` first** — it lists every existing synth,
+processor and modulator with its params and options, and has a "which one to
+copy" table. Pick the closest existing modulator from there and read that one
+file, rather than trawling `src/`. **And update the catalog** when you're
+done: a new type that isn't in it is invisible to the next session.
+
 A modulator extends `RibbitModulator` (`src/modulator.js`),
 which provides `this.output` (a `GainNode`). Structurally a processor's
 sibling — build a continuously-running Web Audio graph in the constructor
@@ -53,10 +59,24 @@ get(), set(value), choices? } }`. One declaration makes it console-settable
 (`/mod1 waveform=square`, validated against `choices`; ramp specs
 rejected), lists it in `help`, and round-trips it through
 `/save_session`/`/recall` — the base `getOptions()` derives from the map,
-so don't override it. Three real examples in tree: `modulators/cv.js` is the
-smallest (a `ConstantSourceNode`, one unbounded param, no options — start
-here), `lfo.js` adds an option and a bounded param, `randomnotes.js` is the
-event-generating shape below.
+so don't override it. An option can't be *ramped*, but it can still be
+*scheduled* (`/mod1 seed=20 at=cycle`) — pick param vs. option by asking
+whether sweeping the value is musical, not whether it needs timing.
+Real examples in tree: `modulators/cv.js` is the smallest (a
+`ConstantSourceNode`, one unbounded param, no options — start here),
+`lfo.js` adds an option and a bounded param, and the three generators below
+are the event-generating shape.
+
+For a param with no `AudioParam` of its own, use `RibbitParamSources`
+(`param.js`) rather than hand-rolling a `ConstantSourceNode` — it handles the
+routed-muted-sink requirement and its `dispose()` is what tears the sinks
+down:
+
+```js
+this._paramSources = new RibbitParamSources(audioContext);
+this.params = { swing: this._paramSources.create(swing, { min: 0, max: 0.5 }) };
+dispose() { this._paramSources.dispose(); }
+```
 
 A modulator can instead generate discrete events (notes) rather than a
 continuous signal — see `modulators/randomnotes.js` (`RibbitRandomNotes`) for
@@ -72,5 +92,38 @@ source=<generator> dest=<track>.notes` (the reserved `.notes` destination —
 see `ribbit.js`'s `createPatch`/`_createEventPatch` and `patch.js`'s
 `RibbitEventPatch`), which is bookkeeping-only (no AudioParam, no `depth`) and
 lives alongside — never replaces — a synth's manually-authored `events`.
+Several generators may feed the same track (only an exact duplicate
+source→dest patch is rejected), which is how a fixed backbone plus a
+decorating layer is built.
+
+Three generators exist, and they differ in *what decides whether a hit
+happens* — worth knowing before adding a fourth, since the useful axis is
+usually a new answer to that question rather than a new sound:
+`randomnotes` rolls fresh dice per slot (never repeats), `markovpercs` looks
+at the previous step (fixed pattern, no notion of bar position),
+`euclidpercs` looks at the step's own index (exactly repeatable, can hold a
+downbeat). A step-string parser (`kicks=x..x..x.`) is the obvious unbuilt
+one, and would slot into the same contract.
+
+A drum generator should drive `RibbitPercSampler` through its published slot
+contract rather than emitting raw slot numbers: store `{ category, variant }`
+and resolve `category * stride + variant` at delivery, where `stride` comes
+from the destination's `slotsPerCategory` when it publishes one (see
+`_stride()` in `markovpercs.js`/`euclidpercs.js`). That's what lets one
+pattern drive a kit with 1 or 8 slots per category, and lets two generators
+share one kit.
+
+Optional: implement `describeState()` returning a short string, appended to
+the object's one-line console summary by `commands.js`'s
+`paramObjectSummary` — for state that's neither a param nor an option (see
+`modulators/markovpercs.js`, which prints its pattern as one line;
+`euclidpercs.js` prints a multi-line grid, one row per category).
+
+Choosing between a param and an option for a generator is worth a moment's
+thought: a value only consulted when the pattern is *regenerated* should be
+an option, even if it's numeric, because a ramp on it would look like a
+control that does nothing. Reserve params for values read fresh inside
+`generateEvents` — `markovpercs` splits exactly this way (`style`/`seed`/
+`steps` are options; `velocity`/`swing` are params).
 
 Removing a type again later: `docs/llm/removing-types.md`.

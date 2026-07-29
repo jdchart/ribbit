@@ -98,10 +98,16 @@ This is the failure mode most easily missed, because it surfaces at runtime
 in files that live outside the source tree.
 
 Every saved session records each object's registry key as `.type`. A session
-JSON naming a type that no longer exists will make `loadSession` **throw
-partway through the rebuild**, leaving a half-constructed graph — the
-`create*` calls in `session.js` are not individually guarded. The same applies
-to `/recall` on a state captured before the removal.
+JSON naming a type that no longer exists **fails to load** — `loadSession`
+and `applySnapshot` both run `assertKnownTypes` before mutating anything, so
+the failure is clean (every unknown type listed in one error, the live
+session left exactly as it was) rather than a graph half-rebuilt from a file
+that ran out partway. The same applies to `/recall` on a state captured
+before the removal.
+
+Clean failure is not recovery, though: the engine won't skip the dead object
+and load the rest, so such a file stays unloadable until someone edits the
+JSON by hand.
 
 So:
 
@@ -141,6 +147,10 @@ Then drive the app (`.claude/skills/run/`) and confirm:
   throwing something uncaught.
 - Ghost-text no longer offers the name after `synth=` / `type=` /
   `add_processor=`.
+- A session file still naming the type names it in the load error and leaves
+  the session *empty* — not partly built (see §4). Worth checking by
+  temporarily editing a `.type` in a copy of a session JSON rather than
+  assuming it.
 - The homepage renders without the removed link, and any remaining demo route
   still loads its session.
 

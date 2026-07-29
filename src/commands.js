@@ -136,6 +136,41 @@ function resolveStartTime(clock, at) {
     return {};
 };
 
+// Runs `fn` now, or defers it to `startTime` — the non-AudioParam counterpart
+// to applyParams' ramp/setInstant branching, and the one place that knows how
+// to defer anything that isn't a param.
+//
+// The point is that at=beat|cycle is a property of *when a command takes
+// effect*, not of whether the thing being changed happens to be rampable.
+// Most of what a live-coding session actually does mid-performance is
+// discrete — reseed a generator, swap a waveform, mute a track, drop in a
+// patch — and all of it wants to land on a boundary rather than wherever the
+// keystroke fell. Before this, only AudioParam-backed values could be
+// deferred and every other command silently ignored an at= it was given,
+// which is the worst of the three options (honoring it, refusing it, or
+// pretending).
+//
+// `fn` returns the "it happened" message. Deferred, that message can't be the
+// command's return value (the command returned long ago), so it goes to
+// ribbit.notify() when the work fires, and the caller's `pending` text — "it
+// will happen" — is returned instead. Anything that can fail must therefore
+// be validated *before* the defer, not inside it: a throw from a bare timer
+// has no command left to attach itself to. That's the same lesson
+// assertKnownTypes encoded for applySnapshot; here the try/catch turns a
+// late failure into a console line rather than an unhandled rejection.
+function runAt(ribbit, { startTime, label }, pending, fn) {
+    if (startTime === undefined) return fn();
+    scheduleAt(ribbit, startTime, () => {
+        try {
+            const message = fn();
+            if (message) ribbit.notify(message);
+        } catch (error) {
+            ribbit.notify(`${pending} (${label}) failed: ${error.message}`);
+        }
+    });
+    return `${pending} (${label})`;
+};
+
 // Converts a user-supplied value to a finite number, throwing (rather than
 // silently producing NaN) so a bad command surfaces as an error via run()'s
 // catch and never corrupts persistent engine state (e.g. clock.bpm sticking
@@ -192,6 +227,16 @@ function formatValue(value) {
     return typeof value === "number" ? value.toFixed(3) : String(value);
 };
 
+// The same job for an *option* rather than a param. Options are discrete
+// settings, not points on a continuous range, so a whole number prints bare:
+// "steps=16.000" implies 16.5 would be accepted, and a markovpercs seed comes
+// out as "668580691.000". Params keep formatValue's fixed 3 decimals, where
+// the trailing zeros correctly signal "this is continuous and rampable".
+function formatOptionValue(value) {
+    if (typeof value !== "number") return String(value);
+    return Number.isInteger(value) ? String(value) : value.toFixed(3);
+};
+
 // "key=value (range min..max)" for a help listing — the range is omitted
 // when a param never declared bounds (e.g. a patch's depth, deliberately
 // unclamped; see RibbitParam's -Infinity/Infinity defaults), since printing
@@ -204,10 +249,12 @@ function formatParamLine(key, param) {
 
 // The options counterpart to formatParamLine — a choices-carrying option
 // (waveform) lists them; anything else just notes it can't be ramped, the
-// one behavioral difference from a param a reader needs to know.
+// one behavioral difference from a param a reader needs to know. It can
+// still be deferred with at= (see applyOptions), so the note is specifically
+// "not rampable" rather than the broader "not schedulable" it used to imply.
 function formatOptionLine(key, option) {
-    const note = option.choices ? ` (choices: ${option.choices.join(", ")})` : " (not rampable)";
-    return `  ${key}=${formatValue(option.get())}${note}`;
+    const note = option.choices ? ` (choices: ${option.choices.join(", ")})` : " (not rampable, but at= works)";
+    return `  ${key}=${formatOptionValue(option.get())}${note}`;
 };
 
 // The one place that knows how to get/set/ramp/defer a param (an RibbitParam —
@@ -256,16 +303,24 @@ function applyParams(ribbit, paramsMap, input, { startTime, label }, { reportUnk
 
 // The options counterpart to applyParams: applies every key of `input` that
 // names one of `object.options` (the declarative non-rampable settings a
-// synth/processor/modulator exposes — see RibbitSynth.options). Unlike a
-// param there's no ramp/defer path (nothing AudioParam-backed to schedule),
-// so a ramp spec or at= on an option is rejected per-key rather than
-// silently half-applied. `exclude` holds keys currently claimed by a
-// composite command in the same input (automate='s from/to/beat/duration,
-// add_event's fields) so e.g. /reverb automate=wet to=1 duration=2 ramps
-// wet over 2 beats rather than ALSO rebuilding the impulse response with a
-// 2-second duration. A `choices`-carrying option validates against that
-// list here, one place, rather than per-class.
-function applyOptions(object, input, exclude = new Set()) {
+// synth/processor/modulator exposes — see RibbitSynth.options).
+//
+// An option can't be *ramped* — there's no AudioParam to draw a curve on, and
+// a half-applied waveform means nothing — so a ramp spec is still rejected
+// per-key. But it can be *deferred*: `/rhy seed=20 at=cycle` reseeds on the
+// next loop boundary, `/lead waveform=square at=beat` switches on the beat.
+// Ramping and scheduling are independent questions, and options only ever
+// failed the first one. (They used to silently drop at= altogether, since
+// "at" simply isn't a key of any object's options map.)
+//
+// `exclude` holds keys currently claimed by a composite command in the same
+// input (automate='s from/to/beat/duration, add_event's fields) so e.g.
+// /reverb automate=wet to=1 duration=2 ramps wet over 2 beats rather than
+// ALSO rebuilding the impulse response with a 2-second duration. A
+// `choices`-carrying option validates against that list here, one place,
+// rather than per-class — and, importantly, *before* runAt, so a bad choice
+// is still a normal command error even when deferred.
+function applyOptions(ribbit, object, input, timing, exclude = new Set()) {
     const results = [];
     for (const [key, spec] of Object.entries(input)) {
         if (exclude.has(key)) continue;
@@ -273,7 +328,7 @@ function applyOptions(object, input, exclude = new Set()) {
         if (!option) continue;
 
         if (isRamp(spec)) {
-            results.push(`${key} can't be ramped (not an audio param) — use ${key}=<value>`);
+            results.push(`${key} can't be ramped (not an audio param) — use ${key}=<value>, optionally with at=beat|cycle`);
             continue;
         }
         if (option.choices && !option.choices.includes(spec)) {
@@ -281,8 +336,15 @@ function applyOptions(object, input, exclude = new Set()) {
             continue;
         }
         try {
-            option.set(spec);
-            results.push(`${key}=${formatValue(option.get())}`);
+            // The deferred echo has to quote the *requested* value: the
+            // setter hasn't run yet, so there's no normalized option.get() to
+            // report (a `samples=random` that resolves to a concrete kit only
+            // knows which kit once it fires — hence the notify() on the way
+            // back out of runAt).
+            results.push(runAt(ribbit, timing, `${key}=${formatOptionValue(spec)}`, () => {
+                option.set(spec);
+                return `${key}=${formatOptionValue(option.get())}`;
+            }));
         } catch (error) {
             results.push(error.message);
         }
@@ -311,7 +373,7 @@ const AUTOMATION_CURVES = ["linear", "exponential", "target"];
 // repeating kind of automation, distinct from a one-off console ramp like
 // gain=0 3). from defaults to the param's current value; values are stored
 // encoded (raw AudioParam domain) since that's what the clock schedules.
-function addAutomationCommand(ribbit, unit, paramsMap, params) {
+function addAutomationCommand(ribbit, unit, paramsMap, params, timing) {
     const key = params.automate;
     const param = paramsMap[key];
     if (!param) return [`unknown param "${key}" to automate`];
@@ -326,22 +388,30 @@ function addAutomationCommand(ribbit, unit, paramsMap, params) {
     const duration = toNumber(params.duration ?? 1, "duration");
     const once = params.once === true;
 
-    unit.addAutomation(new RibbitAutomationEvent({
-        beat,
-        duration,
-        target: param.audioParam,
-        from: param.encode(from),
-        to: param.encode(to),
-        curve,
-        once,
-        paramKey: key,
-    }));
-
     const loopLength = ribbit.clock.loopLengthBeats;
     const beyondLoop = beat >= loopLength
         ? ` (beat ${beat} is beyond the current ${loopLength}-beat loop — it won't fire unless num_beats is raised)`
         : "";
-    return [`automation added: ${key} ${formatValue(from)} -> ${formatValue(to)} at beat ${beat} over ${duration}b (${curve}${once ? ", once" : ""})${beyondLoop}`];
+    const description = `${key} ${formatValue(from)} -> ${formatValue(to)} at beat ${beat} over ${duration}b (${curve}${once ? ", once" : ""})${beyondLoop}`;
+
+    // at= here defers when the automation *joins* the loop, not the
+    // loop-relative beat= it fires on — the two are independent: beat= is the
+    // pattern position it repeats at, at= is which pass it starts repeating
+    // from. `from` is captured now rather than at fire time, matching the
+    // immediate path (and keeping a deferred automate= predictable).
+    return [runAt(ribbit, timing, `automation will be added: ${description}`, () => {
+        unit.addAutomation(new RibbitAutomationEvent({
+            beat,
+            duration,
+            target: param.audioParam,
+            from: param.encode(from),
+            to: param.encode(to),
+            curve,
+            once,
+            paramKey: key,
+        }));
+        return `automation added: ${description}`;
+    })];
 };
 
 // One line per automation event, with its index (the handle remove_automation
@@ -357,13 +427,19 @@ function listAutomation(object, paramsMap) {
     }).join("\n");
 };
 
-function removeAutomationCommand(object, rawIndex) {
+function removeAutomationCommand(ribbit, object, rawIndex, timing) {
     const index = toNumber(rawIndex, "remove_automation");
     if (!Number.isInteger(index) || index < 0 || index >= object.automation.length) {
         return `no automation event ${rawIndex} (see "automations" for the current list)`;
     }
-    object.automation.splice(index, 1);
-    return `automation event ${index} removed`;
+    // Holds the event itself, not the index — same reasoning as remove_event.
+    const event = object.automation[index];
+    return runAt(ribbit, timing, `automation event ${index} will be removed`, () => {
+        const at = object.automation.indexOf(event);
+        if (at === -1) return `automation event ${index} was already gone`;
+        object.automation.splice(at, 1);
+        return `automation event ${index} removed`;
+    });
 };
 
 // Builds the one-line status string for a channel (master, a track, or a
@@ -414,7 +490,7 @@ function channelHelp(ribbit, channel) {
 
     lines.push("", "commands:");
     lines.push("  gain=<val> / pan=<val>          set instantly; add a trailing duration to ramp, e.g. gain=0 3 (3s) or gain=0 4b (4 beats)");
-    lines.push("  at=beat|cycle                    defer a set/ramp above to the next beat/loop boundary instead of firing now");
+    lines.push("  at=beat|cycle                    defer ANY command on this line — a set, a ramp, or a discrete change like start/stop/synth=/an option — to the next beat/loop boundary instead of firing now");
     if (channel.source) {
         lines.push(`  synth=<type>                     swap this track's synth (${ribbit.synthTypes.join(", ")})`);
         lines.push("  add_event beat= pitch=|degree= velocity= duration=   append a note event (all fields optional; beat defaults to 0)");
@@ -481,21 +557,24 @@ function channelCommand(ribbit, channel, params) {
     if (params.help) return channelHelp(ribbit, channel);
     if (Object.keys(params).length === 0) return channelSummary(channel);
 
+    const { warning, ...timing } = resolveStartTime(ribbit.clock, params.at);
+
     if (params.remove_self) {
         if (channel === ribbit.master) return "cannot remove the master channel";
-        if (ribbit.buses.includes(channel)) ribbit.removeBus(channel);
-        else ribbit.removeTrack(channel);
-        return `${channel.name} removed`;
+        return runAt(ribbit, timing, `${channel.name} will be removed`, () => {
+            if (ribbit.buses.includes(channel)) ribbit.removeBus(channel);
+            else ribbit.removeTrack(channel);
+            return `${channel.name} removed`;
+        });
     }
 
-    const { startTime, label, warning } = resolveStartTime(ribbit.clock, params.at);
     const results = warning ? [warning] : [];
 
     // gain/pan go through the exact same param machinery every processor,
     // modulator, and patch uses (see applyParams) — reportUnknown: false
     // since `params` also carries channel-specific keys (add_event, start,
     // synth=, ...) that aren't rampable params at all.
-    results.push(...applyParams(ribbit, channel.params, params, { startTime, label }, { reportUnknown: false }));
+    results.push(...applyParams(ribbit, channel.params, params, timing, { reportUnknown: false }));
 
     // A track's synth's own params and options are addressable straight off
     // the track (/lead waveform=square) — the synth isn't an addressable
@@ -503,8 +582,8 @@ function channelCommand(ribbit, channel, params) {
     // params take precedence on a key collision (none exist today).
     const claimed = compositeClaimedKeys(params);
     if (channel.source) {
-        results.push(...applyParams(ribbit, channel.source.params, params, { startTime, label }, { reportUnknown: false }));
-        results.push(...applyOptions(channel.source, params, claimed));
+        results.push(...applyParams(ribbit, channel.source.params, params, timing, { reportUnknown: false }));
+        results.push(...applyOptions(ribbit, channel.source, params, timing, claimed));
     }
 
     if ("out" in params) {
@@ -516,12 +595,16 @@ function channelCommand(ribbit, channel, params) {
         if (channel === ribbit.master) {
             results.push("master's output is fixed to the speakers — out= is not available on master");
         } else {
+            // Resolved before the defer, not inside it, so a typo'd
+            // destination is still a plain command error — see runAt.
             const destObject = ribbit._resolveObject(params.out);
             if (!destObject || !destObject.input) {
                 results.push(`unknown or invalid destination "${params.out}"`);
             } else {
-                channel.connect(destObject, params.out);
-                results.push(`routed to ${params.out} (replacing previous sends)`);
+                results.push(runAt(ribbit, timing, `will route to ${params.out}`, () => {
+                    channel.connect(destObject, params.out);
+                    return `routed to ${params.out} (replacing previous sends)`;
+                }));
             }
         }
     }
@@ -532,8 +615,13 @@ function channelCommand(ribbit, channel, params) {
             results.push(`unknown or invalid send destination "${params.add_send}"`);
         } else {
             const gain = params.send_gain !== undefined ? toNumber(params.send_gain, "send_gain") : 1;
-            const send = channel.addSend(destObject, { destName: params.add_send, gain });
-            results.push(`added send ${send.id} -> ${params.add_send} (gain ${gain.toFixed(2)})`);
+            // A deferred add_send can't report its send id up front (ids are
+            // handed out at creation), so the pending line names the
+            // destination and the fired line carries the id.
+            results.push(runAt(ribbit, timing, `will add send -> ${params.add_send} (gain ${gain.toFixed(2)})`, () => {
+                const send = channel.addSend(destObject, { destName: params.add_send, gain });
+                return `added send ${send.id} -> ${params.add_send} (gain ${gain.toFixed(2)})`;
+            }));
         }
     }
 
@@ -543,11 +631,14 @@ function channelCommand(ribbit, channel, params) {
         // the one edge the console could never recreate once severed.
         if (send && send.destination === ribbit.audioContext.destination) {
             results.push("master's send to the speakers can't be removed");
+        } else if (!send) {
+            results.push(`no send "${params.remove_send}" on ${channel.name}`);
         } else {
-            const removed = channel.removeSend(params.remove_send);
-            results.push(removed
-                ? `removed send ${params.remove_send}`
-                : `no send "${params.remove_send}" on ${channel.name}`);
+            results.push(runAt(ribbit, timing, `will remove send ${params.remove_send}`, () => (
+                channel.removeSend(params.remove_send)
+                    ? `removed send ${params.remove_send}`
+                    : `no send "${params.remove_send}" on ${channel.name}`
+            )));
         }
     }
 
@@ -558,7 +649,7 @@ function channelCommand(ribbit, channel, params) {
         } else if (!("send_gain" in params)) {
             results.push(`${send.id} -> ${send.destName} (gain ${send.params.gain.get().toFixed(2)})`);
         } else {
-            results.push(...applyParams(ribbit, { gain: send.params.gain }, { gain: params.send_gain }, { startTime, label }));
+            results.push(...applyParams(ribbit, { gain: send.params.gain }, { gain: params.send_gain }, timing));
         }
     }
 
@@ -573,7 +664,6 @@ function channelCommand(ribbit, channel, params) {
                 velocity: params.velocity !== undefined ? toNumber(params.velocity, "velocity") : undefined,
                 duration: params.duration !== undefined ? toNumber(params.duration, "duration") : undefined,
             });
-            channel.source.addEvent(event);
             // beat is loop-relative, so a beat at/past the current loop
             // length never matches a scheduling window — legal (num_beats
             // may grow later), but silent, so it deserves a heads-up.
@@ -581,7 +671,11 @@ function channelCommand(ribbit, channel, params) {
             const beyondLoop = event.beat >= loopLength
                 ? ` (beat ${event.beat} is beyond the current ${loopLength}-beat loop — it won't sound unless num_beats is raised)`
                 : "";
-            results.push(`event added to ${channel.source.name} at beat ${event.beat}${beyondLoop}`);
+            const source = channel.source;
+            results.push(runAt(ribbit, timing, `event will be added to ${source.name} at beat ${event.beat}${beyondLoop}`, () => {
+                source.addEvent(event);
+                return `event added to ${source.name} at beat ${event.beat}${beyondLoop}`;
+            }));
         }
     }
 
@@ -603,11 +697,20 @@ function channelCommand(ribbit, channel, params) {
             results.push(`${channel.name} has no synth`);
         } else {
             const index = toNumber(params.remove_event, "remove_event");
-            if (!Number.isInteger(index) || index < 0 || index >= channel.source.events.length) {
+            const source = channel.source;
+            if (!Number.isInteger(index) || index < 0 || index >= source.events.length) {
                 results.push(`no event ${params.remove_event} (see "events" for the current list)`);
             } else {
-                channel.source.events.splice(index, 1);
-                results.push(`event ${index} removed`);
+                // Deliberately holds the *event object*, not the index: by the
+                // time a deferred removal fires, another command may have
+                // shifted the list and index 2 could be a different note.
+                const event = source.events[index];
+                results.push(runAt(ribbit, timing, `event ${index} will be removed`, () => {
+                    const at = source.events.indexOf(event);
+                    if (at === -1) return `event ${index} was already gone`;
+                    source.events.splice(at, 1);
+                    return `event ${index} removed`;
+                }));
             }
         }
     }
@@ -616,8 +719,11 @@ function channelCommand(ribbit, channel, params) {
         if (!channel.source) {
             results.push(`${channel.name} has no synth`);
         } else {
-            channel.source.events = [];
-            results.push(`${channel.source.name} events cleared`);
+            const source = channel.source;
+            results.push(runAt(ribbit, timing, `${source.name} events will be cleared`, () => {
+                source.events = [];
+                return `${source.name} events cleared`;
+            }));
         }
     }
 
@@ -625,21 +731,29 @@ function channelCommand(ribbit, channel, params) {
     // addAutomationCommand/listAutomation above; the same surface every
     // processor/modulator gets via paramObjectCommand.
     if ("automate" in params) {
-        results.push(...addAutomationCommand(ribbit, channel, channel.params, params));
+        results.push(...addAutomationCommand(ribbit, channel, channel.params, params, timing));
     }
     if (params.automations) results.push(listAutomation(channel, channel.params));
-    if ("remove_automation" in params) results.push(removeAutomationCommand(channel, params.remove_automation));
+    if ("remove_automation" in params) results.push(removeAutomationCommand(ribbit, channel, params.remove_automation, timing));
     if (params.clear_automation) {
-        channel.automation = [];
-        results.push("automation cleared");
+        results.push(runAt(ribbit, timing, "automation will be cleared", () => {
+            channel.automation = [];
+            return "automation cleared";
+        }));
     }
 
+    // Transport on a single track — the most obviously boundary-shaped
+    // gesture in the whole surface: dropping a part in or out mid-bar is
+    // almost never what's wanted, so /hats stop at=cycle is the normal form.
     if (params.start) {
         if (!channel.source) {
             results.push(`${channel.name} has no synth`);
         } else {
-            channel.source.active = true;
-            results.push(`${channel.name} started`);
+            const source = channel.source;
+            results.push(runAt(ribbit, timing, `${channel.name} will start`, () => {
+                source.active = true;
+                return `${channel.name} started`;
+            }));
         }
     }
 
@@ -647,28 +761,44 @@ function channelCommand(ribbit, channel, params) {
         if (!channel.source) {
             results.push(`${channel.name} has no synth`);
         } else {
-            channel.source.active = false;
-            results.push(`${channel.name} stopped`);
+            const source = channel.source;
+            results.push(runAt(ribbit, timing, `${channel.name} will stop`, () => {
+                source.active = false;
+                return `${channel.name} stopped`;
+            }));
         }
     }
 
     if ("synth" in params) {
         if (!channel.source) {
             results.push(`${channel.name} has no synth`);
+        } else if (!ribbit.synthTypes.includes(params.synth)) {
+            // Checked here rather than left to setTrackSynth's own throw so
+            // that an unknown type fails as a command error even when
+            // deferred (see runAt).
+            results.push(`unknown synth type "${params.synth}" (expected ${ribbit.synthTypes.join(", ")})`);
         } else {
-            try {
+            results.push(runAt(ribbit, timing, `synth will be set to ${params.synth}`, () => {
                 ribbit.setTrackSynth(channel, params.synth);
-                results.push(`synth set to ${params.synth}`);
-            } catch (error) {
-                results.push(error.message);
-            }
+                return `synth set to ${params.synth}`;
+            }));
         }
     }
 
     if ("add_processor" in params) {
-        const processor = ribbit.createProcessor(params.add_processor);
-        channel.addProcessor(processor);
-        results.push(`added ${processor.name} (${processor.id})`);
+        if (!ribbit.processorTypes.includes(params.add_processor)) {
+            results.push(`unknown processor type "${params.add_processor}" (expected ${ribbit.processorTypes.join(", ")})`);
+        } else {
+            // Creation is deferred along with insertion, so a deferred
+            // add_processor doesn't leave a named-but-unwired processor
+            // sitting in ribbit.processors until the boundary arrives. The
+            // cost is that its id isn't known until it fires.
+            results.push(runAt(ribbit, timing, `will add ${params.add_processor}`, () => {
+                const processor = ribbit.createProcessor(params.add_processor);
+                channel.addProcessor(processor);
+                return `added ${processor.name} (${processor.id})`;
+            }));
+        }
     }
 
     if ("remove_processor" in params) {
@@ -679,10 +809,15 @@ function channelCommand(ribbit, channel, params) {
         // this one chain, leaving it as an orphaned "ghost" still addressable
         // by name and still ticking on the clock.
         const processor = channel.processors.find((p) => p.id === params.remove_processor);
-        const removed = processor ? ribbit.removeProcessor(processor) : false;
-        results.push(removed
-            ? `removed ${params.remove_processor}`
-            : `no processor "${params.remove_processor}" on ${channel.name}`);
+        if (!processor) {
+            results.push(`no processor "${params.remove_processor}" on ${channel.name}`);
+        } else {
+            results.push(runAt(ribbit, timing, `will remove ${params.remove_processor}`, () => (
+                ribbit.removeProcessor(processor)
+                    ? `removed ${params.remove_processor}`
+                    : `no processor "${params.remove_processor}" on ${channel.name}`
+            )));
+        }
     }
 
     // See CHANNEL_COMMAND_KEYS above — reportUnknown is off for the
@@ -706,10 +841,16 @@ function channelCommand(ribbit, channel, params) {
 function paramObjectSummary(object) {
     const paramList = [
         ...Object.entries(object.params).map(([key, param]) => `${key}=${formatValue(param.get())}`),
-        ...Object.entries(object.options ?? {}).map(([key, option]) => `${key}=${formatValue(option.get())}`),
+        ...Object.entries(object.options ?? {}).map(([key, option]) => `${key}=${formatOptionValue(option.get())}`),
     ].join(", ");
     const idSuffix = object.id ? ` (${object.id})` : "";
-    return `${object.name}${idSuffix}: ${object.llm_summary} [${paramList}]`;
+    // Optional duck-typed hook (same idiom as the clock's generateEvents/
+    // onClockStart) for an object whose interesting state isn't a param or an
+    // option at all — RibbitMarkovPercs' generated pattern is derived from
+    // its seed and style, so nothing in the lists above actually shows you
+    // the rhythm you're about to hear.
+    const state = object.describeState?.();
+    return `${object.name}${idSuffix}: ${object.llm_summary} [${paramList}]${state ? ` ${state}` : ""}`;
 };
 
 // Full reference text for `/reverb1 help` / `/lfo1 help` — every param with
@@ -730,7 +871,7 @@ function paramObjectHelp(ribbit, object) {
 
     lines.push("", "commands:");
     lines.push("  <param>=<val>                    set instantly; add a trailing duration to ramp, e.g. wet=0.5 3 (3s) or wet=0.5 4b (4 beats)");
-    lines.push("  at=beat|cycle                    defer a set/ramp above to the next beat/loop boundary instead of firing now");
+    lines.push("  at=beat|cycle                    defer ANY command on this line — a set, a ramp, or a discrete change like start/stop/synth=/an option — to the next beat/loop boundary instead of firing now");
     lines.push("  automate=<param> to= [from= beat= duration= curve= once]   add loop-position automation (beats, repeats every loop unless once)");
     lines.push("  automations / remove_automation=<n> / clear_automation     list (with indices) / remove one / remove all");
     lines.push("  remove_self                      remove and delete this object");
@@ -763,27 +904,32 @@ const PARAM_OBJECT_COMMAND_KEYS = new Set([
 // on any of the object's params. `removeSelf` is the one bit that differs
 // between the two object kinds (ribbit.removeProcessor vs. ribbit.removeModulator).
 function paramObjectCommand(ribbit, object, params, removeSelf) {
-    if (params.remove_self) {
-        removeSelf();
-        return `${object.name} removed`;
-    }
-
     if (params.help) return paramObjectHelp(ribbit, object);
     if (Object.keys(params).length === 0) return paramObjectSummary(object);
 
-    const { startTime, label, warning } = resolveStartTime(ribbit.clock, params.at);
+    const { warning, ...timing } = resolveStartTime(ribbit.clock, params.at);
+
+    if (params.remove_self) {
+        return runAt(ribbit, timing, `${object.name} will be removed`, () => {
+            removeSelf();
+            return `${object.name} removed`;
+        });
+    }
+
     const results = warning ? [warning] : [];
-    results.push(...applyParams(ribbit, object.params, params, { startTime, label }, { reportUnknown: false }));
-    results.push(...applyOptions(object, params, compositeClaimedKeys(params)));
+    results.push(...applyParams(ribbit, object.params, params, timing, { reportUnknown: false }));
+    results.push(...applyOptions(ribbit, object, params, timing, compositeClaimedKeys(params)));
 
     if ("automate" in params) {
-        results.push(...addAutomationCommand(ribbit, object, object.params, params));
+        results.push(...addAutomationCommand(ribbit, object, object.params, params, timing));
     }
     if (params.automations) results.push(listAutomation(object, object.params));
-    if ("remove_automation" in params) results.push(removeAutomationCommand(object, params.remove_automation));
+    if ("remove_automation" in params) results.push(removeAutomationCommand(ribbit, object, params.remove_automation, timing));
     if (params.clear_automation) {
-        object.automation = [];
-        results.push("automation cleared");
+        results.push(runAt(ribbit, timing, "automation will be cleared", () => {
+            object.automation = [];
+            return "automation cleared";
+        }));
     }
 
     for (const key of Object.keys(params)) {
@@ -862,19 +1008,24 @@ function paramObjectKeywordsFor(object) {
 // processor's/modulator's own params, which come from channelKeywordsFor/
 // paramObjectKeywordsFor above) — the other half of what resolveKeywordsFor
 // needs to cover every command, not just addressable objects. A command with
-// no params of its own (start, tracks, save_session, ...) just isn't listed;
-// resolveKeywordsFor falls back to [] for any recognized top-level name.
+// no params of its own (tracks, patches, save_session, ...) just isn't
+// listed; resolveKeywordsFor falls back to [] for any recognized top-level
+// name. Every command that mutates something carries at=, since all of them
+// can now be deferred to a beat/cycle boundary (see runAt) — the read-only
+// listing commands are the ones with nothing to schedule.
 const TOP_LEVEL_KEYWORDS = {
-    add_track: ["name=", "synth=", "out="],
-    add_bus: ["name=", "out="],
+    start: ["at="],
+    stop: ["at="],
+    add_track: ["name=", "synth=", "out=", "at="],
+    add_bus: ["name=", "out=", "at="],
     clock: ["bpm=", "num_beats=", "at="],
-    harmony: ["root=", "scale="],
-    add_modulator: ["type=", "name="],
+    harmony: ["root=", "scale=", "at="],
+    add_modulator: ["type=", "name=", "at="],
     patch: ["source=", "dest=", "depth=", "id=", "at="],
-    unpatch: ["id="],
-    save: ["name="],
+    unpatch: ["id=", "at="],
+    save: ["name=", "at="],
     recall: ["name=", "at="],
-    remove_state: ["name="],
+    remove_state: ["name=", "at="],
 };
 
 // Every name addressable as `/name`, for completing the command/object-name
@@ -1052,19 +1203,47 @@ function suggestCompletion(ribbit, topLevelNames, input, cursorPos) {
 // own, since dispatch (track/processor name lookup) is re-resolved on every
 // call against the live ribbit.tracks/ribbit.processors arrays.
 export function createCommandRouter(ribbit) {
+    // runAt for a top-level command whose entire body is one mutation:
+    // resolves at=, defers, and prefixes the unknown-at= warning that the
+    // longer handlers (channelCommand, /clock) push onto their results array.
+    // `at` itself is stripped from what reaches the handler, so a command
+    // that forwards its params on as constructor options (add_track,
+    // add_modulator) doesn't carry a scheduling hint into the object it
+    // builds.
+    function scheduled(params, pending, fn) {
+        const { at, ...rest } = params ?? {};
+        const { warning, ...timing } = resolveStartTime(ribbit.clock, at);
+        const result = runAt(ribbit, timing, pending, () => fn(rest));
+        return warning ? `${warning}; ${result}` : result;
+    };
+
     const commands = {
-        start: () => {
+        // at= on /stop is the useful direction — "let the loop finish" —
+        // while /start at= is accepted for uniformity but degenerate: a
+        // suspended AudioContext's currentTime is frozen, so the clock's beat
+        // boundaries aren't advancing to defer against. It still fires (the
+        // delay is computed once, in wall-clock terms); it just isn't
+        // musically anchored to anything.
+        start: (params) => scheduled(params, "engine will start", () => {
             ribbit.start();
             return "engine started";
-        },
-        stop: () => {
+        }),
+        stop: (params) => scheduled(params, "engine will stop", () => {
             ribbit.stop();
             return "engine stopped";
-        },
-        add_track: (params) => {
-            const track = ribbit.createTrack(params);
+        }),
+        // Creating a track/bus/modulator makes no sound on its own, so at=
+        // here is much less useful than on the commands that wire them up
+        // (patch, add_processor, start/stop). It's honored anyway so that
+        // "at= works on anything that mutates" holds without exceptions —
+        // one fewer rule for a caller (or an NL layer) to special-case. The
+        // trade-off worth knowing: a deferred creation can't report the name
+        // it will get, and isn't addressable until it fires, so chaining
+        // `/add_track name=x at=cycle /x gain=0.5` on one line won't work.
+        add_track: (params) => scheduled(params, "track will be created", (options) => {
+            const track = ribbit.createTrack(options);
             return `created ${track.name}`;
-        },
+        }),
         tracks: () => {
             if (ribbit.tracks.length === 0) return "no tracks";
             return ribbit.tracks.map((track) => channelSummary(track)).join("\n");
@@ -1074,10 +1253,10 @@ export function createCommandRouter(ribbit) {
         // destination other tracks/buses can send into, e.g. a shared reverb
         // send or a drum sub-mix. Defaults to feeding master, same as a fresh
         // track, unless out=<name> names a different destination.
-        add_bus: (params) => {
-            const bus = ribbit.createBus(params);
+        add_bus: (params) => scheduled(params, "bus will be created", (options) => {
+            const bus = ribbit.createBus(options);
             return `created ${bus.name}`;
-        },
+        }),
         buses: () => {
             if (ribbit.buses.length === 0) return "no buses";
             return ribbit.buses.map((bus) => channelSummary(bus)).join("\n");
@@ -1127,7 +1306,7 @@ export function createCommandRouter(ribbit) {
                 } else {
                     const target = toNumber(spec, "num_beats");
                     if (startTime !== undefined) {
-                        scheduleAt(ribbit.audioContext, startTime, () => ribbit.clock.setLoopLengthBeats(target));
+                        scheduleAt(ribbit, startTime, () => ribbit.clock.setLoopLengthBeats(target));
                         results.push(`num_beats set to ${target} (${label})`);
                     } else {
                         ribbit.clock.setLoopLengthBeats(target);
@@ -1148,30 +1327,41 @@ export function createCommandRouter(ribbit) {
                 return `root=${ribbit.harmony.root} scale=${ribbit.harmony.scale.join(",")}`;
             }
 
-            const results = [];
+            const { warning, ...timing } = resolveStartTime(ribbit.clock, params.at);
+            const results = warning ? [warning] : [];
+
+            // A key change is the archetypal at=cycle gesture, so both of
+            // these defer even though neither can ramp. Parsing happens
+            // before runAt so a malformed scale is still a command error.
             if ("root" in params) {
                 if (isRamp(params.root)) {
-                    results.push("root can't be ramped — use root=<midi note>");
+                    results.push("root can't be ramped — use root=<midi note>, optionally with at=beat|cycle");
                 } else {
-                    ribbit.harmony.root = toNumber(params.root, "root");
-                    results.push(`root=${ribbit.harmony.root}`);
+                    const root = toNumber(params.root, "root");
+                    results.push(runAt(ribbit, timing, `root=${root}`, () => {
+                        ribbit.harmony.root = root;
+                        return `root=${ribbit.harmony.root}`;
+                    }));
                 }
             }
             if ("scale" in params) {
                 if (isRamp(params.scale)) {
-                    results.push("scale can't be ramped — use scale=<comma-separated degrees>");
+                    results.push("scale can't be ramped — use scale=<comma-separated degrees>, optionally with at=beat|cycle");
                 } else {
-                    ribbit.harmony.scale = parseDegreeList(params.scale);
-                    results.push(`scale=${ribbit.harmony.scale.join(",")}`);
+                    const scale = parseDegreeList(params.scale);
+                    results.push(runAt(ribbit, timing, `scale=${scale.join(",")}`, () => {
+                        ribbit.harmony.scale = scale;
+                        return `scale=${ribbit.harmony.scale.join(",")}`;
+                    }));
                 }
             }
             return results.join("; ");
         },
-        add_modulator: (params) => {
-            const { type, ...options } = params;
+        add_modulator: (params) => scheduled(params, "modulator will be created", (rest) => {
+            const { type, ...options } = rest;
             const modulator = ribbit.createModulator(type ?? "lfo", options);
             return `created ${modulator.name}`;
-        },
+        }),
         modulators: () => {
             if (ribbit.modulators.length === 0) return "no modulators";
             return ribbit.modulators.map(paramObjectSummary).join("\n");
@@ -1202,16 +1392,26 @@ export function createCommandRouter(ribbit) {
                 return `usage: /patch source=<name> dest=<name.param> depth=<0-1> (default 1); adjust later with /patch id=<id> depth=...; or dest=<track>.notes to feed an event-generating modulator's notes into a synth (no depth)`;
             }
 
+            // Patching is audible the moment it happens — a modulator starts
+            // pushing a param, or a generator starts feeding a synth notes —
+            // so at= here is one of the more musically useful cases:
+            // /patch source=rhy dest=hats.notes at=cycle drops the drums in
+            // on the downbeat. createPatch validates (and allocates the id)
+            // when it fires, so a deferred patch reports its id via notify().
             const depth = toNumber(params.depth ?? 1, "depth");
-            const patchObj = ribbit.createPatch({ sourceName: params.source, destName: params.dest, depth });
-            return `patched ${patchSummary(patchObj)}`;
+            return scheduled(params, `will patch ${params.source} -> ${params.dest}`, () => {
+                const patchObj = ribbit.createPatch({ sourceName: params.source, destName: params.dest, depth });
+                return `patched ${patchSummary(patchObj)}`;
+            });
         },
         unpatch: (params) => {
             if (!("id" in params)) return `usage: /unpatch id=<id>`;
             const patchObj = ribbit.patches.find((p) => p.id === params.id);
             if (!patchObj) return `no patch "${params.id}"`;
-            ribbit.removePatch(patchObj);
-            return `${params.id} removed`;
+            return scheduled(params, `${params.id} will be removed`, () => {
+                ribbit.removePatch(patchObj);
+                return `${params.id} removed`;
+            });
         },
         patches: () => {
             if (ribbit.patches.length === 0) return "no patches";
@@ -1224,10 +1424,15 @@ export function createCommandRouter(ribbit) {
         // states survive a save/load round trip. A bare leading token is
         // shorthand for name= (see POSITIONAL_NAME_COMMANDS in
         // parseCommand): "/save 1" and "/save name=1" are equivalent.
+        // at= here defers *when the snapshot is taken*, which is the whole
+        // point of deferring it: "capture how this sounds at the top of the
+        // next cycle" rather than mid-gesture, halfway through a fade.
         save: (params) => {
-            if (!("name" in params)) return `usage: /save <state> (or name=<state>)`;
-            ribbit.states[params.name] = snapshotSession(ribbit);
-            return `saved state "${params.name}"`;
+            if (!("name" in params)) return `usage: /save <state> [at=beat|cycle] (or name=<state>)`;
+            return scheduled(params, `will save state "${params.name}"`, () => {
+                ribbit.states[params.name] = snapshotSession(ribbit);
+                return `saved state "${params.name}"`;
+            });
         },
         // Reconciles the live session toward a saved state without a hard
         // cut — matching objects ramp in place, appearing/disappearing ones
@@ -1259,8 +1464,10 @@ export function createCommandRouter(ribbit) {
         remove_state: (params) => {
             if (!("name" in params)) return `usage: /remove_state name=<state>`;
             if (!(params.name in ribbit.states)) return `no saved state "${params.name}"`;
-            delete ribbit.states[params.name];
-            return `removed state "${params.name}"`;
+            return scheduled(params, `will remove state "${params.name}"`, () => {
+                delete ribbit.states[params.name];
+                return `removed state "${params.name}"`;
+            });
         },
         states: () => {
             const names = Object.keys(ribbit.states);

@@ -28,11 +28,15 @@ grep -rn -i "<type>\|Ribbit<Type>" --include="*.js" --include="*.md" \
   --include="*.svelte" --include="*.json" . | grep -v node_modules
 ```
 
-Usual hits: `README.md` built-in-types list; `docs/user/objects.md` reference
-section; `docs/llm/overview.md` (the registry code block *and* the "Known
-current limitations" section, which is phrased in terms of which types exist);
-`docs/llm/building-*.md` + `docs/dev/creating-*.md` (they cite in-tree types as
-examples); code comments in `src/ribbit.js`.
+Usual hits: `docs/llm/catalog.md` (**always** — delete the type's entry and
+any "which one to copy" row naming it); `README.md` built-in-types list;
+`docs/user/objects.md` reference section; `docs/llm/overview.md` (the registry
+code block *and* the "Known current limitations" section, which is phrased in
+terms of which types exist); `docs/llm/building-*.md` +
+`docs/dev/creating-*.md` (they cite in-tree types as examples);
+`static/sessions/*.json` in the host app (a session naming a removed type
+fails `assertKnownTypes` and won't load at all); code comments in
+`src/ribbit.js`.
 
 When the removed type was the *only* example of a technique, say the hook
 exists with nothing implementing it — don't delete the sentence, or the

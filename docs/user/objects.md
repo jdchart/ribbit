@@ -2,6 +2,13 @@
 
 ## Synths (`synth=` on `/add_track` or a channel)
 
+> **"Not rampable" below never means "can't be scheduled."** Options can't be
+> ramped — there's no curve to draw between two discrete values — but every
+> one of them accepts `at=beat` / `at=cycle` to land the change on a beat or
+> loop boundary, exactly like a param. See
+> [commands.md](commands.md#scheduling-with-at).
+
+
 ### `oscsynth` — `RibbitOscSynth` (default)
 
 > A basic subtractive synth voice: single oscillator per note into a gain envelope.
@@ -45,6 +52,108 @@ resolves it against the harmony context.
 | Constructor option | Default | Runtime option | Meaning |
 |---|---|---|---|
 | `samples` | the 6 files above | `samples` (option) | Comma-separated list of filenames under `static/samples` to load into slots, in order. Runtime-settable — `/drums samples="CLAUDE - kick02.wav,CLAUDE - hat13.wav"` (quoted, since these filenames contain spaces) swaps the slot list live; each slot is silent until its file finishes (re)loading, same fire-and-forget rule as construction. Not rampable. Round-trips through sessions. |
+
+### `percsampler` — `RibbitPercSampler`
+
+> A drum-kit sampler: 4 categories (kicks, snares, hats, percs) x per_category
+> slots, filled at random from the host's sample library; an event's pitch
+> picks a slot and wraps. Humanizes each hit (gain always; pan and playback
+> speed by category).
+
+Where `sampler` plays an arbitrary hand-listed set of files, this builds a
+**structured drum kit**: four categories in a fixed order, `per_category`
+slots each, filled at random from whatever the host has. That published
+layout is the point — it's what lets a rhythm generator ask for "a snare"
+without knowing which files were loaded.
+
+**Slot layout** (with the default `per_category=4`):
+
+| Slots | Category |
+|---|---|
+| 0–3 | kicks |
+| 4–7 | snares |
+| 8–11 | hats |
+| 12–15 | percs |
+
+In general, category *c* (in the order above) occupies slots
+`c * per_category` to `c * per_category + per_category - 1`. An event's
+`pitch` selects a slot and wraps in both directions. Unlike `sampler`, a
+`degree=` event is accepted too — it's read as a slot index (never resolved
+against harmony), so a generic generator like `randomnotes` can drive a kit
+instead of being pinned to slot 0.
+
+| Constructor option | Default | Runtime option | Meaning |
+|---|---|---|---|
+| `per_category` | `4` | `per_category` | Slots per category; total slots are always 4× this. Changing it **re-rolls** the kit, since it redefines every category's slot range. Setting it to the value it already has is a deliberate no-op. Not rampable. |
+| `categories` | all four | `categories` | Which categories this instance actually loads, e.g. `categories=hats,percs`. Slot *indices never change* — unloaded categories keep silent placeholders. This is how one kit is split across several tracks; see [Splitting a kit across tracks](#splitting-a-kit-across-tracks). Order doesn't matter (it's normalized). Not rampable. |
+| `samples` | random | `samples` | Either the literal `random` (re-roll every owned category) or an explicit comma-separated list of paths. Reports the **resolved** filenames, so a saved session restores the exact kit rather than rolling a new one. Not rampable. |
+
+| Constructor option | Default | Runtime **param** | Meaning |
+|---|---|---|---|
+| `dynamics` | `0.25` | `dynamics` | How much each hit's level can fall below its event velocity: scaled by a random factor in `[1 - dynamics, 1]`. Applies to **every** category. Clamped to `0..0.9`, so the quietest possible hit is a tenth of its velocity — this adds dynamics, it never drops notes. Rampable. |
+| `pan_spread` | `0.4` | `pan_spread` | Random stereo placement per hit, ± this much (`1` = hard left to hard right). **hats and percs only.** Rampable. |
+| `speed_spread` | `0.1` | `speed_spread` | Random playback rate per hit, `1 ±` this much. **snares, hats and percs only.** Since this is a sampler, rate moves pitch and length together (tape behaviour) — it's what stops repeated hats sounding like one sample pasted sixteen times. Rampable. |
+
+Kicks deliberately opt out of pan and speed so they keep anchoring the track;
+snares hold the centre but may vary in pitch. These are the engine's first
+**rampable synth params**, so they behave like any other param — `/hats
+pan_spread=0.8 4b`, `at=cycle`, `automate=`, and they're valid `/patch`
+destinations (`/patch source=lfo1 dest=hats.pan_spread depth=0.4`).
+
+#### Generating a new kit
+
+```
+/hats samples=random                          # re-roll one track
+/kick samples=random /snare samples=random    # several at once, one line
+/hats per_category=2                          # re-rolls, and resizes
+```
+
+`/save name=good` captures the resolved filenames, so `/recall good` brings
+back exactly those samples rather than a fresh roll.
+
+#### Splitting a kit across tracks
+
+Because slot indices are absolute regardless of which categories are loaded,
+one generator can drive several restricted tracks and each takes only its own
+share — no filtering or coordination needed. That's how each category gets
+its own inserts, sends and fader:
+
+```
+/add_track name=kick  synth=percsampler categories=kicks
+/add_track name=snare synth=percsampler categories=snares
+/add_bus name=verb
+/verb add_processor=reverb
+/snare add_send=verb send_gain=0.35
+/add_modulator type=markovpercs name=rhy per_category=4
+/patch source=rhy dest=kick.notes
+/patch source=rhy dest=snare.notes
+```
+
+A hit the track doesn't own lands on a placeholder slot and simply makes no
+sound. See `/code-editor/percs-demo` for a worked four-track version.
+
+#### Where the samples come from
+
+Random selection needs to know what files exist, and a browser can't list a
+directory over HTTP. So the host serves a manifest — `/samples/manifest.json`
+by default, overridable with the `manifest_url` constructor option — shaped:
+
+```json
+{ "kicks": ["kicks/CLAUDE - kick01.wav"], "snares": [], "hats": [], "percs": [] }
+```
+
+Each entry is a path relative to the same `/samples/` prefix the audio files
+are served under. In the NLLC app this is generated on request from
+`static/samples/`; see `nllc/docs/dev/README.md`. A host that serves no
+manifest gets an empty kit and a console warning, not an error — set
+`samples=<list>` explicitly instead.
+
+> **Console limitation:** an explicit `samples=` list is really only settable
+> from a session file. Sample paths contain both `/` and spaces, and the
+> console's parser treats `/` as the start of the next command and a space as
+> the end of a value, so a pasted path is truncated. Ribbit rejects the
+> truncated result rather than loading nonsense. Use `samples=random` at the
+> console.
 
 ## Buses (`/add_bus`)
 
@@ -103,10 +212,26 @@ processor, but it never joins any channel's chain. On its own it does
 nothing audible; it only matters once patched into a parameter with
 `/patch` — see [commands.md](commands.md#modulators-and-patches).
 
-There are three, in two shapes. `lfo` and `cv` both produce a **continuous
+There are five, in two shapes. `lfo` and `cv` both produce a **continuous
 signal** patched into a parameter (`lfo` moves by itself, `cv` holds
-whatever you set); `randomnotes` instead generates **discrete notes** and
-patches into a track's synth rather than a parameter.
+whatever you set); `randomnotes`, `markovpercs` and `euclidpercs` instead
+generate **discrete notes** and patch into a track's synth rather than a
+parameter.
+
+The three generators differ in *what decides whether a hit happens*:
+
+| Generator | Decides from | Repeats? |
+|---|---|---|
+| `randomnotes` | a fresh dice roll at each slot | never — no two bars alike |
+| `markovpercs` | the previous step (a Markov chain) | yes, one fixed pattern until reseeded |
+| `euclidpercs` | the step's own index (euclidean distribution) | yes, exactly — it can hold a downbeat |
+
+That last distinction is the important one: `markovpercs` has no notion of
+where in the bar it is, so it produces convincing *texture* but can't place a
+kick on every beat; `euclidpercs` decides each step from its position, so it
+can. They're designed to be used together — a euclidean backbone with a Markov
+layer adding ghost notes around it. Several generators may feed the same
+track (only an exact duplicate patch is rejected).
 
 ### `lfo` — `RibbitLFO` (default)
 
@@ -179,6 +304,138 @@ entry from `scale` becomes that note's `degree`. With the default chromatic
 harmony scale, `scale`'s numbers behave as plain semitone offsets from the
 harmony root — the default `0,2,4,5,7,9,11` is therefore a major scale.
 
+### `markovpercs` — `RibbitMarkovPercs`
+
+> Generates a fixed drum rhythm from a Markov chain over [rest, kicks,
+> snares, hats, percs] and loops it until reseeded; feeds a percsampler via
+> `/patch dest=<track>.notes`.
+
+A rhythm generator for [`percsampler`](#percsampler--ribbitpercsampler). It
+walks a first-order Markov chain once across a step grid to build **one fixed
+pattern**, then loops that pattern — the same hits on the same slots every
+pass — until something regenerates it. That's the key difference from
+`randomnotes`, which re-rolls forever and so never settles into a groove you
+can build on.
+
+The pattern stores a category and a variant *within* that category, not a
+finished slot number; the slot arithmetic happens at delivery. So the same
+pattern maps correctly onto a kit with 1 slot per category or 8, and it reads
+`per_category` off whatever it's patched into when it can.
+
+| Constructor option | Default | Runtime option | Meaning |
+|---|---|---|---|
+| `style` | `"rolling"` | `style` | Which transition table to use: `sparse`, `rolling`, `broken`, `kickheavy`, `chaotic`. Regenerates. Not rampable. |
+| `seed` | random | `seed` | The PRNG seed. Accepts a number or the literal `random`. Reports the concrete number in use, so a saved session rebuilds the *same* rhythm. Regenerates. Not rampable. |
+| `steps` | `16` | `steps` | Steps in the pattern. Regenerates. Not rampable. |
+| `step_beats` | `0.25` | `step_beats` | Grid resolution in beats (`0.25` = sixteenths). With `steps` this sets the pattern's length before it repeats — `steps × step_beats` beats, deliberately independent of the clock's loop length, so a 3-beat rhythm over a 4-beat loop phases rather than locking. Regenerates. Not rampable. |
+| `density` | `1` | `density` | Thins the pattern without changing its character: each hit the chain produces survives with this probability. `1` leaves the chain's own rest rate alone; `0` silences it. Regenerates. Not rampable. |
+| `per_category` | `4` | `per_category` | Fallback slot stride, used only when the patched destination doesn't publish its own. Not rampable. |
+
+| Constructor option | Default | Runtime **param** | Meaning |
+|---|---|---|---|
+| `velocity` | `1` | `velocity` | Base velocity for generated hits. Read fresh every tick, so ramping it audibly rides the pattern already playing. Clamped `0..1`. Rampable. |
+| `swing` | `0` | `swing` | Delays every odd step by this fraction of a step — the usual shuffle feel. Even steps stay put, so the pulse doesn't drift. Clamped `0..0.5`. Rampable. |
+
+Everything shaping the *pattern* is an option (setting it regenerates);
+`velocity` and `swing` are params because they apply live to the pattern
+already running. Hits landing on a whole beat are accented; everything
+between is played a little softer.
+
+The styles are named for the **texture** a chain produces, not for genres.
+There's no `fourfloor` on purpose: a first-order chain's only input is the
+previous step, so it has no idea where in the bar it is and can't reliably
+place a kick on every downbeat. [`euclidpercs`](#euclidpercs--ribbiteuclidpercs)
+is the tool for that, and shares the same slot-index contract — so both can
+drive the same kit at once, which is exactly what the `euclid-ghosts` example
+session does.
+
+```
+/add_track name=drums synth=percsampler
+/add_modulator type=markovpercs name=rhy style=broken seed=31415 density=0.8
+/patch source=rhy dest=drums.notes
+/rhy                      # prints the pattern, e.g. .sk.HhshSp.s...k
+/rhy seed=random          # a different rhythm
+/rhy swing=0.3 8b         # ease into a shuffle over 8 beats
+```
+
+Querying it (`/rhy`, or the modulator list) prints the generated pattern as
+one character per step — `k`/`s`/`h`/`p` per category, `.` for a rest,
+uppercased where a step lands on a whole beat. The params and options only
+describe how the rhythm was *derived*; this shows what you'll actually hear.
+
+### `euclidpercs` — `RibbitEuclidPercs`
+
+> Generates a repeatable drum grid: one euclidean rhythm per category
+> (kicks/snares/hats/percs), each with its own pulse count and rotation; feeds
+> a percsampler via `/patch dest=<track>.notes`.
+
+The other rhythm generator for
+[`percsampler`](#percsampler--ribbitpercsampler), and the deliberate
+counterpart to [`markovpercs`](#markovpercs--ribbitmarkovpercs). It places
+each category's hits with **Bjorklund's algorithm**: spread *n* pulses as
+evenly as possible over the available steps. Every hit is decided by its own
+step index, so the pattern is exactly repeatable — this is the generator that
+can hold a downbeat.
+
+Two structural differences from `markovpercs` worth knowing:
+
+- **Each category is an independent layer.** A Markov step is a kick *or* a
+  snare *or* a rest; a euclidean step can be a kick **and** a hat, which is
+  what makes a real kit pattern possible.
+- **Randomization decorates the grid rather than replacing it** — see
+  `variation` and `dropout` below. Nothing can move a hit off its step.
+
+Maximally-even distributions turn out to be a remarkable number of traditional
+rhythms: E(3,8) is the tresillo, E(5,8) the cinquillo, E(5,16) the bossa-nova
+pattern, E(4,16) four-on-the-floor.
+
+| Constructor option | Default | Runtime option | Meaning |
+|---|---|---|---|
+| `preset` | `"fourfloor"` | `preset` | Sets the grid length plus every category's pulses and rotation at once: `fourfloor`, `backbeat`, `tresillo`, `bossa`, `polyrhythm`, `sparse`. A "start again from here" gesture — it replaces all of them, and individual settings applied afterwards win. Regenerates. Not rampable. |
+| `steps` | from preset | `steps` | Steps in the grid. Regenerates. Not rampable. |
+| `step_beats` | `0.25` | `step_beats` | Grid resolution in beats (`0.25` = sixteenths). With `steps` this sets the pattern's length — `steps × step_beats` beats, independent of the clock's loop length, so the 12-step `polyrhythm` preset phases against a 4-beat loop rather than locking. Regenerates. Not rampable. |
+| `kicks`, `snares`, `hats`, `percs` | from preset | same | Pulse count for that category, capped at `steps`. `0` silences the layer. Regenerates. Not rampable. |
+| `kicks_rotate`, `snares_rotate`, `hats_rotate`, `percs_rotate` | from preset | same | Rotates that layer forward: `snares_rotate=4` moves its first hit *to* step 4. This is how a backbeat is built — E(2,16) rotated by 4. Regenerates. Not rampable. |
+| `variation` | `0` | `variation` | How often a hit uses a sample slot other than its category's first. `0` = every kick is the same kick; `1` = spread across the whole category. Seeded, so it's part of the fixed pattern. Regenerates. Not rampable. |
+| `seed` | random | `seed` | PRNG seed for `variation`. Accepts a number or the literal `random`. Regenerates. Not rampable. |
+| `per_category` | `4` | `per_category` | Fallback slot stride, used only when the patched destination doesn't publish its own. Not rampable. |
+
+| Constructor option | Default | Runtime **param** | Meaning |
+|---|---|---|---|
+| `velocity` | `1` | `velocity` | Base velocity for generated hits. Read fresh every tick. Clamped `0..1`. Rampable. |
+| `swing` | `0` | `swing` | Delays every odd step by this fraction of a step. Clamped `0..0.5`. Rampable. |
+| `dropout` | `0` | `dropout` | Probability that any given hit is skipped **on any given pass** — the pattern breathes instead of machine-gunning. Re-rolled live, so unlike everything else here it isn't reproducible; it can only ever *remove* a hit, never move one, so the grid survives it. Capped at `0.9` (silencing a part is what `gain=` is for). Rampable — `/grid dropout=0.5 8b` opens the pattern up over 8 beats. |
+
+Hits landing on a whole beat are accented; everything between is played a
+little softer.
+
+```
+/add_track name=drums synth=percsampler
+/add_modulator type=euclidpercs name=grid preset=fourfloor
+/patch source=grid dest=drums.notes
+/grid                          # prints the grid, one row per category
+/grid preset=tresillo          # a different starting point
+/grid kicks=3 kicks_rotate=2   # pulses and rotation, per category
+/grid steps=12                 # change grid length; layers re-space themselves
+/grid dropout=0.4 8b           # thin it out over 8 beats
+/grid preset=bossa at=cycle    # swap the backbone on the next downbeat
+```
+
+Querying it (`/grid`, or the modulator list) prints the grid, one row per
+category — `X` for a hit on a whole beat, `x` for one between beats, `.` for a
+gap:
+
+```
+kicks  X...X...X...X...
+snares ....X.......X...
+hats   X.x.X.x.X.x.X.x.
+percs  ..x..x..X..x..x.
+```
+
+Two example sessions ship with the reference app: `euclid-demo` (this
+generator alone) and `euclid-ghosts` (a euclidean backbone with `markovpercs`
+adding ghost notes on top).
+
 ## Events
 
 A synth's pattern is a list of events, authored with `/track_1 add_event ...`
@@ -188,8 +445,8 @@ Each event has:
 | Field | Default | Meaning |
 |---|---|---|
 | `beat` | `0` | Loop-relative position (`0` to the clock's `num_beats`, see [commands.md](commands.md#top-level-commands)). |
-| `pitch` | `60` if neither `pitch=` nor `degree=` given | A raw MIDI note number (`oscsynth`) or sample-slot index (`sampler`). |
-| `degree` | — | A scale-degree, resolved against the shared harmony context **at the moment the note is triggered**, not when `add_event` was run. Only meaningful for `oscsynth`; `sampler` ignores it. |
+| `pitch` | `60` if neither `pitch=` nor `degree=` given | A raw MIDI note number (`oscsynth`) or sample-slot index (`sampler`, `percsampler`). |
+| `degree` | — | A scale-degree, resolved against the shared harmony context **at the moment the note is triggered**, not when `add_event` was run. Only meaningful for `oscsynth`; `sampler` ignores it, and `percsampler` reads it as a slot index without resolving it. |
 | `velocity` | `1` | 0–1, used as the note's peak gain. |
 | `duration` | `0.25` | In beats, not seconds — the clock converts using the current tempo at trigger time. |
 

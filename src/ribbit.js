@@ -5,9 +5,12 @@ import { RibbitReverb } from "./processors/reverb.js";
 import { RibbitDelay } from "./processors/delay.js";
 import { RibbitOscSynth } from "./synths/oscsynth.js";
 import { RibbitSampler } from "./synths/sampler.js";
+import { RibbitPercSampler } from "./synths/percsampler.js";
 import { RibbitLFO } from "./modulators/lfo.js";
 import { RibbitRandomNotes } from "./modulators/randomnotes.js";
 import { RibbitCV } from "./modulators/cv.js";
+import { RibbitMarkovPercs } from "./modulators/markovpercs.js";
+import { RibbitEuclidPercs } from "./modulators/euclidpercs.js";
 import { RibbitPatch, RibbitEventPatch } from "./patch.js";
 import { createHarmonyContext } from "./harmony.js";
 
@@ -25,12 +28,15 @@ const PROCESSOR_TYPES = {
 const SYNTH_TYPES = {
     oscsynth: RibbitOscSynth,
     sampler: RibbitSampler,
+    percsampler: RibbitPercSampler,
 };
 
 const MODULATOR_TYPES = {
     lfo: RibbitLFO,
     randomnotes: RibbitRandomNotes,
     cv: RibbitCV,
+    markovpercs: RibbitMarkovPercs,
+    euclidpercs: RibbitEuclidPercs,
 };
 
 // Every name the console router dispatches before it ever looks at objects:
@@ -94,6 +100,45 @@ export class Ribbit {
 
         this.clock = new RibbitClock(this.audioContext);
         this.clock.addUnit(this.master);
+
+        // Live setTimeout ids from automation.js's scheduleAt — deferred work
+        // that can't ride native AudioParam scheduling (/recall's structural
+        // create/remove/reorder, /clock num_beats= at=). Native scheduling
+        // dies with the AudioContext; these don't, so dispose() has to cancel
+        // them explicitly or they fire against a closed context. Entries
+        // remove themselves once they run.
+        this._deferredTimers = new Set();
+
+        // Optional host-supplied sink for output that no command is waiting
+        // on — deferred at=beat/at=cycle work, and a loaded session's readme
+        // (see notify() below). A host that doesn't set it still sees
+        // everything, just in the browser console.
+        this.onMessage = null;
+
+        // The current session's readme: an array of lines a session file can
+        // carry to introduce itself when opened (what it is, which commands
+        // to try). Set by session.js's loadSession, serialized back out by
+        // sessionToJSON, and empty for a session that was never loaded from
+        // a file.
+        this.readme = [];
+    };
+
+    // Pushes a line of unprompted output to the host (see onMessage). `kind`
+    // is a presentation hint the host may style differently: "deferred" for
+    // at=-scheduled work reporting back, "readme" for a session introducing
+    // itself on load.
+    //
+    // Every ordinary command reports by *returning* a string, which the host
+    // prints. Some output can't work that way: by the time a `/hats seed=20
+    // at=cycle` actually reseeds, its command has long since returned, and a
+    // session auto-loaded from a URL had no command to begin with. Without a
+    // channel like this one, a deferred failure (a name that collided in the
+    // meantime, an option setter that threw) would vanish silently — worse
+    // than for an immediate command, because the user has already been told
+    // it was scheduled.
+    notify(text, kind = "deferred") {
+        if (this.onMessage) this.onMessage(text, kind);
+        else console.log(`[ribbit] ${text}`);
     };
 
     // Registered type names (see PROCESSOR_TYPES/SYNTH_TYPES/MODULATOR_TYPES
@@ -139,6 +184,13 @@ export class Ribbit {
     // promise for a caller that wants to await the teardown.
     dispose() {
         this.stop();
+        // Deferred work from scheduleAt (see _deferredTimers above) is the
+        // third thing outliving this object: a /recall or a deferred
+        // num_beats= still in flight would otherwise wake up after close().
+        // stop() already covers the clock's own two timers (its tick loop and
+        // any in-flight rampBpm).
+        for (const id of this._deferredTimers) clearTimeout(id);
+        this._deferredTimers.clear();
         // Same duck-typed hook removeTrack/removeModulator use for a single
         // object; here it covers everything still alive at teardown.
         for (const track of this.tracks) track.source?.dispose?.();

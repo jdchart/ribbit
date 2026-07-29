@@ -19,6 +19,9 @@
 - A value can be followed by a bare duration to turn a set into a ramp, e.g.
   `gain=0.5 3` (over 3 seconds) or `gain=0.5 4b` (over 4 beats) — see
   [Ramps](#ramps) below.
+- `at=beat` or `at=cycle` anywhere in a command defers it to the next beat or
+  loop boundary. This works on *every* command that changes something, not
+  only ramps — see [Scheduling with `at=`](#scheduling-with-at).
 - Several commands can be typed on one line and run together, e.g.
   `/track_1 gain=0 8 /reverb wet=0.9 6b` — the line is split on each `/name`
   it finds and every segment runs in the same call, so they schedule off the
@@ -60,8 +63,8 @@ params:
 
 commands:
   gain=<val> / pan=<val>          set instantly; add a trailing duration to ramp, e.g. gain=0 3 (3s) or gain=0 4b (4 beats)
-  at=beat|cycle                    defer a set/ramp above to the next beat/loop boundary instead of firing now
-  synth=<type>                     swap this track's synth (oscsynth, sampler)
+  at=beat|cycle                    defer ANY command on this line — a set, a ramp, or a discrete change like start/stop/synth=/an option — to the next beat/loop boundary instead of firing now
+  synth=<type>                     swap this track's synth (oscsynth, sampler, percsampler)
   add_event beat= pitch=|degree= velocity= duration=   append a note event (all optional except beat)
   ...
 ```
@@ -80,18 +83,18 @@ below).
 | Command | Effect |
 |---|---|
 | `/start` | Resumes the `AudioContext` and starts the clock. |
-| `/stop` | Suspends the `AudioContext` and stops the clock. |
+| `/stop` | Suspends the `AudioContext` and stops the clock. `/stop at=cycle` lets the current loop finish first. |
 | `/add_track [name=] [synth=] [out=] [...synth options]` | Creates a track. `name` defaults to `"track"` (de-duplicated as `track_2`, `track_3`, ... if taken by *any* existing object or reserved command name — see [Names](#names); pass `name=` explicitly for a nicer name). `synth` selects the synth type (default `oscsynth`; see [objects.md](objects.md)). `out` sets where its one default send feeds (default `master`; see [Buses and sends](#buses-and-sends)). Any other params are passed straight to the synth's constructor (e.g. `synth=oscsynth waveform=square`). A fresh track's synth starts with **no events** — see `add_event` below. |
 | `/tracks` | Lists every track's summary line (same format as running a track command with no params). |
 | `/add_bus [name=] [out=]` | Creates a bus — an empty channel (fader/pan/inserts/sends, no synth) that exists purely to be a shared send destination for other tracks/buses (see [Buses and sends](#buses-and-sends)). `name` defaults to `"bus"` (de-duplicated, like tracks). `out` sets where its one default send feeds (default `master`). |
 | `/buses` | Lists every bus's summary line. |
-| `/clock [bpm=] [num_beats=]` | With no params, reports the current `bpm=... num_beats=...`. `bpm=<n>` changes tempo (glitch-free while running — the current playback position is preserved); it also accepts a trailing ramp duration (`/clock bpm=140 8`, ramps tempo smoothly over 8 seconds) and `at=beat`/`at=cycle` to defer the start — see [Ramps](#ramps). `num_beats=<n>` changes the loop length in beats (defaults to 4) and is **not** rampable (a shifting loop length has no sensible meaning — a ramp spec there is rejected with a message). Both are runtime-mutable at any time. |
-| `/harmony [root=] [scale=]` | With no params, reports the shared harmony context (`root=60 scale=0,1,2,...`). `root=<midi note>` moves the key's root; `scale=<comma-separated degrees>` (e.g. `scale=0,2,4,5,7,9,11` for major) changes which semitone offsets the scale contains. Because every event's `degree=` (and every `randomnotes` stream) resolves against this context **at trigger time**, a change retunes already-playing patterns live, mid-loop — see [objects.md](objects.md#events). Neither is rampable. |
+| `/clock [bpm=] [num_beats=]` | With no params, reports the current `bpm=... num_beats=...`. `bpm=<n>` changes tempo (glitch-free while running — the current playback position is preserved); it also accepts a trailing ramp duration (`/clock bpm=140 8`, ramps tempo smoothly over 8 seconds) and `at=beat`/`at=cycle` to defer the start — see [Ramps](#ramps). `num_beats=<n>` changes the loop length in beats (defaults to 4) and is **not** rampable (a shifting loop length has no sensible meaning — a ramp spec there is rejected with a message), though it still accepts `at=` like anything else. Both are runtime-mutable at any time. |
+| `/harmony [root=] [scale=]` | With no params, reports the shared harmony context (`root=60 scale=0,1,2,...`). `root=<midi note>` moves the key's root; `scale=<comma-separated degrees>` (e.g. `scale=0,2,4,5,7,9,11` for major) changes which semitone offsets the scale contains. Because every event's `degree=` (and every `randomnotes` stream) resolves against this context **at trigger time**, a change retunes already-playing patterns live, mid-loop — see [objects.md](objects.md#events). Neither is rampable, but both take `at=beat`/`at=cycle` — `/harmony root=64 at=cycle` is the usual way to change key, landing it on the downbeat. |
 | `/add_modulator [type=] [name=] [...modulator options]` | Creates a modulator — a continuous control source you can patch into any parameter (see [Modulators and patches](#modulators-and-patches) below). `type` defaults to `lfo`. Any other params are passed to the modulator's constructor (e.g. `type=lfo freq=2 name=lfo1`). |
 | `/modulators` | Lists every modulator's summary line (same format as running a modulator command with no params/`help`). |
 | `/patch source=<name> dest=<name.param> [depth=]` | Creates a patch — see [Modulators and patches](#modulators-and-patches). |
 | `/patch id=<id> [depth=]` | Adjusts an existing patch's depth (rampable, `at=` deferrable). With no `depth=`, reports the patch's summary. |
-| `/unpatch id=<id>` | Removes a patch. |
+| `/unpatch id=<id>` | Removes a patch. Takes `at=` (`/unpatch id=x1 at=cycle`). |
 | `/patches` | Lists every active patch, e.g. `x1: lfo1 -> reverb.wet (depth 0.20)` — or, for an event-generating modulator's patch into a synth, `x2: rand1 -> lead.notes (generated notes)` (see [Event-generating modulators](#event-generating-modulators-patching-notes-into-a-synth)). |
 | `/save name=<state>` (or `/save <state>`) | Captures everything live (clock, harmony, master/buses/tracks and their inserts/sends, modulators, patches) under `<state>`, held in memory — see [Session and states](#session-and-states). A bare leading value is shorthand for `name=`: `/save 1` and `/save name=1` are equivalent (works for non-numeric names too, e.g. `/save verse1`). |
 | `/recall name=<state> [<duration>] [at=beat\|cycle]` (or `/recall <state> ...`) | Reconciles the live session toward a saved state — matching objects ramp in place, appearing/disappearing ones fade in/out, rather than a hard cut. A trailing duration on `name=` ramps the whole change over that long, e.g. `name=verse1 3` (3s) or `name=verse1 4b` (4 beats) — same convention as any other ramp (see [Ramps](#ramps)); with none, every change still happens (deferred to `at=` if given), just as an instant jump. Same bare-leading-value shorthand as `/save`: `/recall 1 4b at=cycle` is `/recall name=1 4b at=cycle`. |
@@ -117,7 +120,7 @@ bus has the same shape, minus the trailing `synth=...` (it has none).
 |---|---|
 | `gain=<0..1>` | Sets the channel's fader position (clamped, exponentially tapered onto actual output level for perceptually-even steps — see [objects.md](objects.md#gain-taper)). Rampable and `at=` deferrable — see [Ramps](#ramps). Can also be a patch destination (`track_1.gain`, `bus1.gain`). |
 | `pan=<-1..1>` | Sets stereo pan (clamped). Also rampable/deferrable/patchable, same as `gain=`. |
-| `add_event [beat=] [pitch=\|degree=] [velocity=] [duration=]` | Appends one event to the track's synth. All fields optional (defaults: `beat=0`, `pitch=60` if neither `pitch=` nor `degree=` given, `velocity=1`, `duration=0.25`). `pitch=` is a raw MIDI note (or, for `sampler`, a slot index); `degree=` is a scale-degree resolved against the shared harmony context *at trigger time* instead — see [objects.md](objects.md#events). A `beat` at or past the current loop length is accepted (it starts sounding if `num_beats` is later raised past it) but flagged with a warning, since it won't fire until then. Not valid on master or a bus (neither has a synth). |
+| `add_event [beat=] [pitch=\|degree=] [velocity=] [duration=]` | Appends one event to the track's synth. All fields optional (defaults: `beat=0`, `pitch=60` if neither `pitch=` nor `degree=` given, `velocity=1`, `duration=0.25`). `pitch=` is a raw MIDI note (or, for `sampler`/`percsampler`, a slot index); `degree=` is a scale-degree resolved against the shared harmony context *at trigger time* instead — see [objects.md](objects.md#events). A `beat` at or past the current loop length is accepted (it starts sounding if `num_beats` is later raised past it) but flagged with a warning, since it won't fire until then. Not valid on master or a bus (neither has a synth). |
 | `events` | Lists the track's synth's events, one per line with an index: `0: beat=0 pitch=60 velocity=1 duration=0.25`. The index is the handle `remove_event=` takes. Not valid on master or a bus. |
 | `remove_event=<n>` | Removes one event by its `events` index. Out-of-range indices are rejected with a pointer back to `events`. Not valid on master or a bus. |
 | `clear_events` | Empties the track's synth's event list. Not valid on master or a bus. |
@@ -229,10 +232,11 @@ that was feeding into it, the same way removing a patch's endpoint does.
 ## Modulators and patches
 
 A **modulator** is a standalone control source — created and addressed just
-like a processor, but it never sits in any channel's signal chain. Three
+like a processor, but it never sits in any channel's signal chain. Four
 types ship: `lfo` (a low-frequency oscillator, the default), `cv` (a held
-value you set/ramp yourself), and `randomnotes` (which generates notes
-rather than a signal — see [below](#event-generating-modulators-patching-notes-into-a-synth)).
+value you set/ramp yourself), and two that generate notes rather than a
+signal — `randomnotes` and `markovpercs` (see
+[below](#event-generating-modulators-patching-notes-into-a-synth)).
 Full reference: [objects.md](objects.md#modulators-type-on-add_modulator).
 A modulator only matters once you **patch** it somewhere:
 
@@ -275,10 +279,10 @@ outlives what it was connected to.
 
 ### Event-generating modulators: patching notes into a synth
 
-A modulator that **generates discrete notes** (currently just `randomnotes` —
-see [objects.md](objects.md#modulators-type-on-add_modulator)) instead of a continuous signal can be
-patched straight into a track's control input, alongside — not instead of —
-anything you `add_event`'d by hand:
+A modulator that **generates discrete notes** (`randomnotes` and
+`markovpercs` — see [objects.md](objects.md#modulators-type-on-add_modulator))
+instead of a continuous signal can be patched straight into a track's control
+input, alongside — not instead of — anything you `add_event`'d by hand:
 
 ```
 /add_track name=lead
@@ -356,43 +360,98 @@ to the value over time instead of setting it instantly:
 /clock bpm=140 8         ...and tempo itself
 ```
 
-A ramp starts right now by default. Add `at=beat` or `at=cycle` to defer the
-start to the next beat boundary or the next loop boundary instead:
+Ramping is about *how a value travels* between two numbers. When it should
+*start* is a separate control — see [Scheduling with `at=`](#scheduling-with-at),
+which applies to far more than ramps.
+
+## Scheduling with `at=`
+
+A command takes effect the moment you hit Enter. Add `at=beat` or `at=cycle`
+to make it land on the next beat boundary or the top of the next loop instead:
 
 ```
-/track_1 gain=0 3 at=beat    starts on the next beat, not immediately
-/reverb wet=0.9 6b at=cycle  starts at the top of the next loop
+/track_1 gain=0 3 at=beat    ramp starts on the next beat, not immediately
+/reverb wet=0.9 6b at=cycle  ramp starts at the top of the next loop
+/track_1 gain=0.9 at=beat    plain jump to 0.9, exactly on the next beat
 ```
 
-`at=beat`/`at=cycle` also works on a plain (non-ramped) instant set, deferring
-the jump to that boundary instead of applying it the moment you hit Enter:
+**`at=` works on every command that changes something** — not just ramps, and
+not just params. Whether a value can be *ramped* and whether it can be
+*scheduled* are separate questions, and only the first one depends on there
+being an `AudioParam` behind it:
 
 ```
-/track_1 gain=0.9 at=beat    jumps to 0.9 exactly on the next beat
+/rhy seed=20 at=cycle              reseed a rhythm generator on the downbeat
+/lead waveform=square at=beat      swap the oscillator on the beat
+/harmony root=64 at=cycle          change key at the top of the next loop
+/hats stop at=cycle                drop a part at the end of the bar
+/drums synth=sampler at=cycle      swap a synth
+/track_1 add_processor=reverb at=cycle
+/patch source=rhy dest=hats.notes at=cycle    bring a generator in on the bar
+/track_1 clear_events at=cycle
+/save v1 at=cycle                  snapshot at a clean point, not mid-gesture
 ```
+
+Only the read-only listing commands (`/tracks`, `/patches`, `events`,
+`automations`, `help`, ...) ignore it — there's nothing to schedule.
+
+A deferred command replies twice. First, immediately, with what *will* happen:
+
+```
+> /hats stop at=cycle
+hats will stop (next cycle)
+```
+
+Then, when it actually fires, with what happened — marked with a `·` since no
+command directly preceded it:
+
+```
+· hats stopped
+```
+
+Errors are reported at the right time too. Anything checkable up front is
+rejected as a normal error even when deferred (`/rhy style=nonsense at=cycle`
+fails immediately), and anything that can only fail later reports on the `·`
+line rather than disappearing.
 
 An unrecognized `at=` value is reported as a warning and falls back to "now"
 rather than silently misbehaving or aborting the command. Combine with the
-multi-command-per-line syntax (see [Syntax](#syntax)) to set several ramps off
-together: `/track_1 gain=0 8 /reverb wet=0.9 6b`.
+multi-command-per-line syntax (see [Syntax](#syntax)) to fire several
+scheduled changes together:
+`/track_1 gain=0 8 at=cycle /reverb wet=0.9 6b at=cycle`.
+
+One caveat: a deferred *creation* (`/add_track name=x at=cycle`) can't report
+the name it will get, and the object doesn't exist until it fires — so it
+can't be referred to by a later command on the same line.
 
 ## Params vs. options
 
 Every addressable object exposes up to two kinds of setting, and `help`
 lists them separately:
 
-- A **param** (`gain`, `wet`, `freq`, `probability`, ...) is backed by a
-  real Web Audio `AudioParam`: it can be ramped (`wet=0.9 6b`), deferred
-  (`at=beat`/`at=cycle`), patched into (`/patch dest=reverb.wet`), and
-  loop-automated (`automate=wet ...`).
+- A **param** (`gain`, `wet`, `freq`, `probability`, `dropout`, ...) is backed
+  by a real Web Audio `AudioParam`: it can be ramped (`wet=0.9 6b`), patched
+  into (`/patch dest=reverb.wet`), and loop-automated (`automate=wet ...`).
 - An **option** (`waveform`, `scale`, a reverb's `duration`/`decay`, a
-  delay's `stereoOffset`, a sampler's `samples`) is a plain setting with no
-  AudioParam behind it — settable at runtime the exact same way
-  (`/lfo1 waveform=square`, `/rand1 scale=0,3,5,7,10`,
-  `/reverb duration=4`), but **not** rampable, deferrable, patchable, or
-  automatable; a ramp spec on one is rejected with a message. An option
-  with a fixed set of valid values (a waveform) rejects anything else and
-  the console's ghost-text completes from that set.
+  delay's `stereoOffset`, a sampler's `samples`, a generator's `seed`/`preset`)
+  is a plain setting with no AudioParam behind it — settable at runtime the
+  exact same way (`/lfo1 waveform=square`, `/rand1 scale=0,3,5,7,10`,
+  `/reverb duration=4`), but **not rampable, patchable, or loop-automatable**;
+  a ramp spec on one is rejected with a message. An option with a fixed set of
+  valid values (a waveform, a preset) rejects anything else and the console's
+  ghost-text completes from that set.
+
+The one thing options are **not** excluded from is scheduling: `at=beat` /
+`at=cycle` works on them exactly as it does on a param (see
+[Scheduling with `at=`](#scheduling-with-at)). "Not rampable" means there's no
+curve to draw between two values — a half-applied waveform is meaningless — not
+that the change can't be timed.
+
+Which of the two a given value is is a design decision about whether *sweeping*
+it is musical. `percsampler`'s `pan_spread` is a param because opening it up
+over a few bars is a gesture you'd want; `markovpercs`' `style` is an option
+because it's only consulted when the pattern regenerates, so a ramp would look
+like a control that does nothing.
 
 Both round-trip through `/save`/`/recall` and session files. See
 [objects.md](objects.md) for every type's params and options.

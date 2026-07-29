@@ -206,6 +206,26 @@ keeping changes musically in time rather than landing mid-phrase:
 /drums gain=0 4b at=cycle
 ```
 
+**`at=` isn't just for ramps.** It works on *anything* that changes something,
+which matters because most of what you do live is discrete — swapping a
+waveform, muting a part, reseeding a generator — and hitting Enter mid-bar is
+almost never when you want it to land:
+
+```
+/lead waveform=square at=beat      swap the oscillator on the beat
+/drums stop at=cycle               drop the part at the end of the bar
+/harmony root=64 at=cycle          change key at the top of the next loop
+```
+
+A deferred command answers twice. Straight away it tells you what *will*
+happen, then when it fires it reports back on a line marked with `·`:
+
+```
+> /drums stop at=cycle
+drums will stop (next cycle)
+· drums stopped
+```
+
 You can also fire several commands from one line, all together:
 
 ```
@@ -217,8 +237,9 @@ You can also fire several commands from one line, all together:
 Three more live controls, all of them console-first:
 
 **Options** are runtime settings without an AudioParam behind them — set
-them like a param, they just can't ramp. A track routes its synth's options
-through its own name:
+them like a param, they just can't ramp. (They *can* still be scheduled with
+`at=`; "not rampable" only means there's no curve to draw between two
+values.) A track routes its synth's options through its own name:
 
 ```
 /lead waveform=square        the oscillator shape, from the next note on
@@ -425,6 +446,170 @@ touches the authored ones. Tune it live like any other param:
 [commands.md](commands.md#event-generating-modulators-patching-notes-into-a-synth)
 and [objects.md](objects.md#modulators-type-on-add_modulator) for the full reference.
 
+## Drums: a kit and a rhythm generator
+
+`percsampler` and `markovpercs` are a matched pair — a drum kit and something
+to play it. The kit builds itself:
+
+```
+/add_track name=drums synth=percsampler
+/add_modulator type=markovpercs name=rhy
+/patch source=rhy dest=drums.notes
+/start
+```
+
+That's a full drum track. `percsampler` picked 16 samples at random from the
+host's library — four each of kicks, snares, hats and percs — and
+`markovpercs` generated a rhythm and is looping it.
+
+Unlike `randomnotes`, which re-rolls forever, `markovpercs` commits to **one
+pattern** and repeats it until you ask for another. Query it to see what it
+came up with:
+
+```
+/rhy
+```
+
+Alongside the params, you'll get something like `.sk.HhshSp.s...k` — one
+character per step (`k`/`s`/`h`/`p` per category, `.` for a rest, uppercase on
+the beat). Don't like it? Reseed:
+
+```
+/rhy seed=random          a different rhythm, same character
+/rhy style=kickheavy      a different character (sparse, rolling, broken, kickheavy, chaotic)
+/rhy density=0.5          thin it out
+/rhy swing=0.3 8b         ease into a shuffle over 8 beats
+```
+
+`velocity` and `swing` are params, so they ramp and apply to the pattern
+already playing. Everything else is an option that regenerates the pattern —
+including `seed`, which is why a saved session rebuilds the *same* rhythm
+rather than rolling a new one.
+
+### When you need a downbeat
+
+Try as you might, you won't get `markovpercs` to put a kick on every beat.
+That isn't a missing feature — it's structural. A Markov chain picks each step
+by looking at *the step before it*, so it has no idea where in the bar it is.
+It's very good at texture and hopeless at architecture.
+
+`euclidpercs` is the other half of the pair. It decides each step from the
+step's **own index**, spreading a category's hits as evenly as possible across
+the grid (Bjorklund's algorithm — the same maths behind a surprising number of
+traditional rhythms):
+
+```
+/add_modulator type=euclidpercs name=grid preset=fourfloor
+/patch source=grid dest=drums.notes
+/grid
+```
+
+Now you get a grid instead of a single line — one row per category, `X` on a
+whole beat, `x` between, `.` for a gap:
+
+```
+kicks  X...X...X...X...
+snares ....X.......X...
+hats   X.x.X.x.X.x.X.x.
+percs  ................
+```
+
+That kick lands on all four downbeats, every pass, forever. Notice the other
+difference too: these are four **independent layers**, so a step can be a kick
+*and* a hat at once — a Markov step was only ever one thing.
+
+Presets are starting points, not genres; everything stays editable afterwards:
+
+```
+/grid preset=tresillo          fourfloor, backbeat, tresillo, bossa, polyrhythm, sparse
+/grid kicks=3                  three kicks, spread evenly
+/grid snares_rotate=4          move the snare layer to land on beat 2
+/grid steps=12                 a 12-step grid phases against a 4-beat loop
+```
+
+Two kinds of randomization keep it from sounding like a drum machine, neither
+of which can move a hit off the grid:
+
+```
+/grid variation=0.8            each hit picks a different sample from its category
+/grid dropout=0.4 8b           hits start dropping out, ramped over 8 beats
+```
+
+`variation` is seeded and fixed (part of the pattern); `dropout` re-rolls
+every pass, so the pattern breathes.
+
+### Both at once
+
+The two generators are designed to be used together — and because several can
+feed the same track, you just patch both:
+
+```
+/add_modulator type=markovpercs name=ghosts density=0.4 velocity=0.3
+/patch source=ghosts dest=drums.notes
+```
+
+`grid` holds the backbone you can count against; `ghosts` scatters quiet notes
+around it. That's the whole idea behind the `euclid-ghosts` example session —
+open it from the homepage to hear a tuned version, with each drum on its own
+track.
+
+### A new kit
+
+```
+/drums samples=random     re-roll this track's samples
+/drums per_category=2     two per category instead of four (also re-rolls)
+```
+
+Found a kit you like? `/save name=good` records the actual filenames, so
+`/recall good` brings those samples back rather than rolling again.
+
+### Each drum through its own effects
+
+A kit on one track shares one insert chain. To send kicks somewhere different
+from snares, give each category its own track with `categories=`:
+
+```
+/add_track name=kick  synth=percsampler categories=kicks
+/add_track name=snare synth=percsampler categories=snares
+/add_track name=hats  synth=percsampler categories=hats
+
+/add_bus name=verb
+/verb add_processor=reverb
+/snare add_send=verb send_gain=0.35
+
+/add_modulator type=markovpercs name=rhy
+/patch source=rhy dest=kick.notes
+/patch source=rhy dest=snare.notes
+/patch source=rhy dest=hats.notes
+```
+
+One generator drives all three, and each track plays only the hits it owns —
+slot numbers stay the same whichever categories a track loads, so a snare hit
+lands on a placeholder on the `kick` track and simply makes no sound. Now
+each drum has its own fader, pan, inserts and sends.
+
+### Humanizing
+
+Every hit is randomized a little, which is what stops a pattern sounding
+pasted together. Three rampable params control how much:
+
+```
+/hats dynamics=0.5          vary level (all categories; never silent)
+/hats pan_spread=0.8 4b     spread across the stereo field (hats/percs only)
+/hats speed_spread=0.25     vary pitch and length (snares/hats/percs only)
+```
+
+Kicks stay centred and at pitch on purpose — they anchor everything else.
+Being real params, these also work as patch destinations, so a slow LFO can
+open the stereo picture up and close it again:
+
+```
+/add_modulator type=lfo name=drift freq=0.06
+/patch source=drift dest=hats.pan_spread depth=0.4
+```
+
+Load `/code-editor/percs-demo` for a worked version of all of this.
+
 ## The mixer
 
 At the top, the **Transport** bar has the engine on/off button, a pulsing
@@ -537,6 +722,32 @@ hand — see [Running it](#running-it) above. The mixer's Transport bar has
 Save JSON/Load JSON buttons that run these same two commands (`/save_json`/
 `/load_json`, plain aliases for `/save_session`/`/load_session`) — see
 [The mixer](#the-mixer).
+
+### Giving a session a readme
+
+A session file can introduce itself. Add a top-level `readme` — an array of
+lines — and the console prints it the moment the session opens:
+
+```json
+{
+  "version": 1,
+  "readme": [
+    "verse — a euclidean grid with ghost notes on top.",
+    "",
+    "Try:",
+    "  /grid dropout=0.4 8b     thin the backbone out",
+    "  /ghosts seed=random      re-roll only the decoration"
+  ],
+  "clock": { "bpm": 92, "loopLengthBeats": 4 }
+}
+```
+
+It's the right place for what the session *is* and which commands are worth
+trying — the things you'd otherwise have to rediscover by reading the JSON.
+`/save_json` writes it back out, so it survives a round trip; a `/save`d
+*state* doesn't carry one, since it describes the session as a whole rather
+than any one snapshot. Every session shipped with the app has one — open any
+of them from the homepage to see it.
 
 See [commands.md](commands.md#session-and-states) for the full reference.
 

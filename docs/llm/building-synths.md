@@ -3,6 +3,12 @@
 Full tutorial with rationale: `docs/dev/creating-a-synth.md`. This is the
 condensed recipe.
 
+**Read `docs/llm/catalog.md` first** — it lists every existing synth,
+processor and modulator with its params and options, and has a "which one to
+copy" table. Pick the closest existing synth from there and read that one
+file, rather than trawling `src/`. **And update the catalog** when you're
+done: a new type that isn't in it is invisible to the next session.
+
 A synth extends `RibbitSynth` (`src/synth.js`), which provides
 `this.output` (a `GainNode`), `this.events`/`this.automation` arrays, `this.active`,
 and `addEvent()`/`addAutomation()`. Implement `trigger(time, event,
@@ -52,11 +58,31 @@ future key/scale-changing command; skip this if `pitch` means something else
 params, the same way a processor does (see `docs/llm/building-processors.md`)
 — `channelCommand` routes a track's synth's `params` (and `options`, below)
 through the track's own name automatically, so `/mytrack cutoff=800 2b`
-works with no `commands.js` change.
+works with no `commands.js` change, and they're valid `/patch` destinations
+too (`dest=mytrack.cutoff`, via `_resolveDest`'s `channel.source.params`
+fallback). `synths/percsampler.js` is the worked example — it declares
+`dynamics`/`pan_spread`/`speed_spread`. Note a synth param needs a real
+`AudioParam` behind it; if the value has no node of its own, use
+`RibbitParamSources` (`param.js`):
+
+```js
+this._paramSources = new RibbitParamSources(audioContext);
+this.params = { cutoff: this._paramSources.create(cutoff, { min: 20, max: 20000 }) };
+dispose() { this._paramSources.dispose(); }
+```
+
+It handles the Web Audio quirk that makes a bare `ConstantSourceNode`
+unreliable (a node with no path into the rendered graph can have its
+`setValueAtTime` automation silently never reflected in later `.value` reads,
+so each source must be routed through a muted sink into
+`audioContext.destination`). The `dispose()` call is required — those sinks
+aren't reachable from `this.output`.
 
 For a runtime setting *not* backed by any `AudioParam` (like `waveform`
 above), declare it in `this.options` instead — `{ key: { get(), set(value),
-choices? } }`:
+choices? } }`. Choose param vs. option by asking whether *sweeping* the value
+is musical, not whether it needs scheduling: options can't be ramped, but
+they can still be deferred with `at=beat`/`at=cycle` like any other command.
 
 ```js
 this.options = {
@@ -82,5 +108,16 @@ stop it — `Ribbit.removeTrack`/`setTrackSynth` call it duck-typed (like
 implementing when there's actually something to tear down. Neither built-in
 synth does, so there's no in-tree example to copy from; `randomnotes` is the
 nearest one.
+
+Optional: implement `describeState()` returning a short string, and
+`commands.js`'s `paramObjectSummary` will append it to the object's one-line
+summary. It's for state that is neither a param nor an option —
+`RibbitMarkovPercs` uses it to print its generated pattern, since its options
+only describe how that pattern was *derived*.
+
+If your synth loads external assets, note the host contract precedent:
+`RibbitPercSampler` fetches a manifest (`/samples/manifest.json`, overridable
+per instance) because a browser can't list a directory, and degrades to an
+empty kit plus a `console.warn` rather than throwing out of a constructor.
 
 Removing a type again later: `docs/llm/removing-types.md`.

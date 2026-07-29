@@ -3,7 +3,8 @@
 All DSP/engine code lives in `src/`. Base classes
 (`synth.js`, `processor.js`, `modulator.js`, `channel.js`, etc.) live directly
 in this folder; non-base implementations live one level down, grouped by
-kind — `synths/oscsynth.js`, `synths/sampler.js`, `processors/reverb.js`,
+kind — `synths/oscsynth.js`, `synths/sampler.js`, `synths/percsampler.js`,
+`processors/reverb.js`,
 `processors/delay.js`, `modulators/lfo.js` — so adding a new one is "add a
 file to the matching subfolder, plus one registry line in `ribbit.js`," with no
 other file needing to change. Files below are listed roughly bottom-up
@@ -37,6 +38,34 @@ own params, a modulator's own params, a patch's `depth`. Wraps a single raw
   stereo width). Ramping/deferred `at=` scheduling still only animates the
   "primary" `.audioParam` directly — `onSet` only affects the plain
   instant-set case.
+
+**`RibbitParamSources`** lives here too — the factory for a param that wants
+all of the above but has no `AudioParam` in the audio graph to hang off
+(`RibbitRandomNotes.probability`, `RibbitMarkovPercs.swing`,
+`RibbitEuclidPercs.dropout`, `RibbitPercSampler.pan_spread`). It invents one
+from a `ConstantSourceNode`'s `.offset`, and is a shared class rather than a
+one-liner per call site because of a Web Audio quirk that has to be explained
+somewhere: a node with no path into the rendered graph can have its
+`setValueAtTime` automation silently never reflected in later `.value`
+reads — even though a direct `.value =` assignment always works — so each
+source is routed through a muted (`gain: 0`) sink into
+`audioContext.destination`. Connected enough to stay live, silent enough
+never to be heard.
+
+```js
+this._paramSources = new RibbitParamSources(audioContext);
+this.params = {
+    swing: this._paramSources.create(swing, { min: 0, max: 0.5 }),
+};
+dispose() { this._paramSources.dispose(); }
+```
+
+`min`/`max` are declared once and used twice — to clamp the initial value and
+as the returned `RibbitParam`'s bounds. The owner **must** call
+`dispose()`: those sinks reach `audioContext.destination` directly, so the
+generic `output.disconnect()` in `removeModulator`/`removeTrack` never
+touches them. This was open-coded in three classes before, each re-explaining
+the quirk and keeping its own parallel `_sinks` array.
 
 `.get()`/`.set(value)`/`.clamp(value)` are the whole public surface;
 `.audioParam` is public too, and is what `commands.js`'s `applyParams` reaches
@@ -94,6 +123,21 @@ curve })`, called directly by the command router (via `commands.js`'s
 an absolute time (`audioContext.currentTime` by default) rather than a
 loop-relative beat, and never registered with the clock. See
 [architecture.md](architecture.md#two-ramp-scheduling-paths-one-curve-implementation).
+
+`setInstant(audioContext, param, value, startTime)` writes a value at a
+(possibly future) time instead of assigning `.value`, so `at=beat`/`at=cycle`
+can defer a plain set the way `scheduleRamp` defers a ramp.
+
+`scheduleAt(ribbit, time, fn)` is the escape hatch for work that can't ride
+native `AudioParam` scheduling at all — structural graph changes
+(`applySnapshot`'s create/remove/reorder) and plain non-`AudioParam` numbers
+(`RibbitClock.loopLengthBeats` for `/clock num_beats= at=`). Note it takes the
+whole `ribbit`, not an `audioContext` like its siblings above, and that
+asymmetry is deliberate: everything else in this module hands work to the
+browser's audio thread, where closing the context cancels it, but a
+`setTimeout` outlives `Ribbit.dispose()` and would then run against a closed
+context. It registers its timer id in `ribbit._deferredTimers` (removing
+itself when it fires) so `dispose()` can cancel whatever is still in flight.
 
 ## `clock.js` — `RibbitClock`
 
@@ -219,6 +263,51 @@ slot index (handles negative pitches correctly, not just `%`); `event.degree`
 is ignored entirely (pitch is always a slot index here, never resolved against
 harmony). Starts with an empty `events` array, same as `RibbitOscSynth`.
 
+## `synths/percsampler.js` — `RibbitPercSampler extends RibbitSynth`
+
+A structured drum kit rather than a flat sample list. `PERC_CATEGORIES`
+(`["kicks","snares","hats","percs"]`, exported) times `perCategory` gives the
+slot layout, and that layout is a **published contract** — `modulators/
+markovpercs.js` codes against it, and the `slotsPerCategory` getter is what
+lets a generator read the stride off its destination instead of hardcoding
+it. Deliberately not a subclass of `RibbitSampler`: it shares only the
+fetch/decode idiom, and inheriting would put the parent's flat slot list in
+tension with this one's category structure.
+
+Three things worth knowing before editing it:
+
+- **The manifest.** Random selection needs to know what files exist, which a
+  browser can't discover, so `fetchManifest` GETs `/samples/manifest.json`
+  (per-instance `manifest_url`). It's cached per URL twice over — as a
+  promise (collapsing concurrent construction) and, once settled, as a
+  resolved object in `resolvedManifests`. The second cache exists so
+  `_randomize()` can take a **synchronous** path: awaiting even a settled
+  promise costs a microtask, which is long enough for `applyOptions` to have
+  printed its confirmation line, so a re-roll would echo the kit it just
+  replaced.
+- **Placeholders keep slot indices absolute.** A category outside
+  `this.categories` still occupies its slots, filled with `null`. That's the
+  whole mechanism behind splitting a kit across tracks: a generator emits
+  index 6 for "snare variant 2" regardless of who's listening, and a
+  hats-only track lands on a placeholder and no-ops via the existing
+  `if (!slot?.buffer) return`.
+- **`_generation` guards against stale rolls.** A roll resolves
+  asynchronously and *replaces* the whole slot list; without the counter, a
+  roll you rejected followed immediately by an explicit `samples=` would win
+  on arrival. Note `per_category`/`categories` setters return early when
+  unchanged — that's load-bearing, not an optimization: `applyOptionsSnapshot`
+  replays options in declaration order, so `/recall` sets `samples` and then
+  `per_category`, and an unconditional re-roll there would discard the kit it
+  just restored.
+
+`trigger()` is also the engine's only per-hit randomizer: `dynamics` scales
+gain on every category, while `pan_spread` and `speed_spread` apply per the
+`RANDOMIZATION` table (kicks opt out of both so they keep anchoring the
+track). The `StereoPannerNode` is built only when it would do something.
+These are the engine's first rampable **synth** params, so this is also the
+first exercise of `channelCommand`'s synth-param routing and of
+`_resolveDest`'s `channel.source.params` fallback (`dest=hats.pan_spread`).
+
 ## `processor.js` — `RibbitProcessor` (base)
 
 Mirrors `RibbitSynth`: `name`, `input`/`output` (both `GainNode`s — subclasses wire
@@ -291,6 +380,79 @@ rather than a second LFO. `params.value` is deliberately given no `min`/`max`
 patch scales it per-destination, so clamping here would be an arbitrary cap.
 `get value()` is the usual thin alias onto the underlying `AudioParam`.
 
+## `modulators/markovpercs.js` — `RibbitMarkovPercs extends RibbitModulator`
+
+The second event-generating modulator, and the opposite shape to
+`RibbitRandomNotes`: it walks a first-order Markov chain over
+`[rest, ...PERC_CATEGORIES]` **once**, from a seeded PRNG (`mulberry32` —
+`Math.random()` can't be seeded, and seedability is what makes a rhythm
+survive a session round trip), building a fixed `pattern` that
+`generateEvents` then indexes straight off the absolute step number. No
+cursor is needed (unlike `randomnotes`), and it realigns by itself after a
+`/stop`/`/start`.
+
+The split between options and params is deliberate: anything shaping the
+pattern (`style`, `seed`, `steps`, `step_beats`, `density`) is an **option**
+whose setter regenerates, because a param you could ramp but that's only
+consulted at regeneration time would look like a control that does nothing.
+`velocity`/`swing` are **params** precisely because they're read fresh every
+tick and so genuinely ride the pattern already playing.
+
+Pattern cells store `{ category, variant }` rather than a finished slot
+number; `_stride()` resolves the arithmetic at delivery time, preferring the
+patched destination's `slotsPerCategory` over this modulator's own
+`per_category`. `describeState()` renders the pattern for the console (see
+`commands.js`'s `paramObjectSummary`).
+
+`STYLES` is named for texture, not genre, and there's no `fourfloor` on
+purpose — a first-order chain has no notion of bar position, so it cannot
+place a kick on every downbeat. That's `modulators/euclidpercs.js`'s job; it
+shares this file's slot contract exactly, so both can drive one kit at once.
+
+## `modulators/euclidpercs.js` — `RibbitEuclidPercs extends RibbitModulator`
+
+The grid-position counterpart to `markovpercs`, and the other driver for
+`RibbitPercSampler`. `euclid(pulses, steps)` is Bjorklund's algorithm —
+repeatedly pair the "hit" groups with the "gap" groups until at most one
+remainder is left; what falls out is the maximally-even distribution.
+Verified against the canonical results (E(3,8) tresillo, E(5,8) cinquillo,
+E(5,16) bossa, E(7,16), E(2,5)).
+
+The structural difference from `markovpercs` is that **each category is an
+independent layer**, built and stored separately in `this.layers`. A Markov
+step is one voice; a euclidean step can be a kick *and* a hat, which is what
+makes a kit pattern possible. `generateEvents` therefore loops over
+`PERC_CATEGORIES` inside its step loop and may emit several events per step.
+
+Rotation is applied as `hits[(step - rotation + steps) % steps]` — subtract,
+so `snares_rotate=4` moves the first hit *to* step 4. Adding instead is
+invisible on an evenly-spaced layer like E(2,16) (it's a symmetry of the
+pattern) and obviously wrong on a single-pulse one, which is exactly how the
+direction bug survived first testing.
+
+`PRESETS` set grid length plus per-category pulses and rotations. The
+constructor gives **explicitly-passed values precedence over the preset's**,
+which is what makes `getOptions()` round-trip: a session stores both the
+preset name and the concrete numbers, so an edited pattern reloads as edited
+rather than snapping back. The `preset` *setter*, by contrast, replaces
+everything — it's a "start again from here" gesture.
+
+Randomization is split along the reproducible/live line:
+
+- `variation` (option, seeded, regenerates) picks which sample slot within a
+  category each hit uses. Part of the fixed pattern.
+- `dropout` (param, live) skips hits per pass, re-rolled from `Math.random()`
+  and deliberately *not* seeded. It's the only non-reproducible thing here,
+  and it can only ever remove a hit, never move one, so the grid survives it.
+
+The per-category options (`kicks`, `kicks_rotate`, ...) are built in a loop
+over `PERC_CATEGORIES` rather than written out eight times, so a category
+added to the sampler becomes drivable automatically instead of silently
+going missing. `_stride()` is the same contract as `markovpercs`' — currently
+the one piece genuinely duplicated between the two generators; a third grid
+generator would be the point to lift it onto `RibbitModulator`.
+`describeState()` renders one row per category.
+
 ## `modulators/randomnotes.js` — `RibbitRandomNotes extends RibbitModulator`
 
 The event-generating counterpart to `RibbitLFO` — see
@@ -317,12 +479,20 @@ with an `AnalyserNode` for its meter, which incidentally keeps that
 particular node's automation live — not a real fix, and not something a
 class should rely on. `RibbitRandomNotes` instead routes each
 `ConstantSourceNode` through its own muted (`gain: 0`, inaudible always)
-sink into `audioContext.destination` (`_silentSink`), which reliably keeps
-it live regardless of whether the mixer is even mounted. Those sinks aren't
-reachable via `this.output`, so `Ribbit.removeModulator`'s generic
-`modulator.output.disconnect()` alone wouldn't tear them down — `dispose()`
-(called via the same duck-typed-optional-hook pattern as `generateEvents`
-itself) stops both `ConstantSourceNode`s and disconnects their sinks.
+sink into `audioContext.destination`, which reliably keeps it live
+regardless of whether the mixer is even mounted. That machinery lives in
+**`RibbitParamSources`** (`param.js`) rather than in this class: the same
+idiom is needed by `RibbitMarkovPercs` (`velocity`/`swing`) and
+`RibbitPercSampler` (`dynamics`/`pan_spread`/`speed_spread`), and was
+open-coded three times before, each copy re-explaining the quirk and
+keeping its own parallel sink array. A caller now writes
+`this._paramSources.create(value, { min, max })` and gets a `RibbitParam`
+back. Those sinks aren't reachable via `this.output`, so
+`Ribbit.removeModulator`'s generic `modulator.output.disconnect()` alone
+wouldn't tear them down — `dispose()` (called via the same
+duck-typed-optional-hook pattern as `generateEvents` itself) delegates to
+`this._paramSources.dispose()`, which stops every `ConstantSourceNode` and
+disconnects every sink.
 
 `scale` (a list of candidate harmony-context degrees a generated note's pitch
 is randomly picked from) isn't backed by any `AudioParam` at all — it's a
@@ -392,11 +562,35 @@ is the one function that knows how to get/set/ramp/defer any `RibbitParam` (see
 processor/modulator param), and the `/patch` command (depth), replacing what
 used to be three separate hand-rolled copies of the same
 ramp/instant/`at=` branching. Its non-rampable sibling is
-`applyOptions(object, input, exclude)` — applies keys naming entries in an
-object's declarative `options` map (rejecting ramp specs, validating
-against `choices`), with `exclude` = `compositeClaimedKeys(params)` so a
-composite command's generic keys (`automate=`'s `duration=`, say) don't
-also hit a same-named option (reverb's `duration`). The automate family —
+`applyOptions(nllc, object, input, timing, exclude)` — applies keys naming
+entries in an object's declarative `options` map (rejecting ramp specs,
+validating against `choices`), with `exclude` = `compositeClaimedKeys(params)`
+so a composite command's generic keys (`automate=`'s `duration=`, say) don't
+also hit a same-named option (reverb's `duration`). It takes `timing` because
+an option, while never rampable, *is* schedulable — see `runAt` below.
+
+`runAt(nllc, { startTime, label }, pending, fn)` is the third scheduling
+path, and the one that makes `at=` universal: it runs `fn` now, or defers it
+via `automation.js`'s `scheduleAt`. Where `applyParams` picks between
+`scheduleRamp` and `setInstant` for anything `AudioParam`-backed, `runAt`
+covers everything that isn't — options, transport, routing, processor
+inserts, event edits, patches, object creation and removal. `fn` returns the
+"it happened" message; deferred, that can't be the command's return value, so
+it goes to `nllc.notify()` and the caller's `pending` ("it will happen") text
+is returned instead.
+
+The rule this imposes on callers: **validate before the defer, never inside
+it.** A throw from a bare timer has no command left to report to, which is why
+`channelCommand` checks unknown `synth=`/`add_processor=` types explicitly
+rather than letting the constructor throw, and why `applyOptions` validates
+`choices` before calling `runAt`. `runAt`'s own try/catch is the backstop,
+turning a genuinely-late failure into a `notify()` line rather than an
+unhandled one. This is the same lesson `assertKnownTypes` encoded for
+`session.js`. Top-level commands use the thin `scheduled(params, pending, fn)`
+wrapper inside `createCommandRouter`, which additionally strips `at` from the
+params forwarded on as constructor options.
+
+The automate family —
 `addAutomationCommand` (builds an `RibbitAutomationEvent` with encoded
 values and a `paramKey`), `listAutomation` (indexed, decoded),
 `removeAutomationCommand` — is likewise shared by both command shapes.
@@ -535,6 +729,19 @@ The top-level object and factory/registry hub:
   forever — so dropping the last JS reference to a `Ribbit` stops nothing.
   A host that unmounts without calling this leaves the session audibly
   playing (see `SessionPage.svelte`'s `onMount` cleanup in the reference app).
+- `onMessage` / `notify(text, kind = "deferred")` — the channel for output no
+  command is waiting on. `onMessage` is an optional host-supplied
+  `(text, kind) => void`; `notify` calls it, or falls back to `console.log`.
+  It exists because not everything can be a command's return value: deferred
+  `at=` work reports back long after its command returned
+  (`kind: "deferred"`), and a session auto-loaded from a URL never had a
+  command at all (`kind: "readme"`). Without it, a deferred *failure* would
+  vanish silently — worse than an immediate one, since the user has already
+  been told the change was scheduled. `nllc`'s `SessionPage.svelte` wires it
+  to `CodeEditor.appendOutput`.
+- `readme` — the current session's introduction lines, set by
+  `session.js`'s `loadSession` and written back by `sessionToJSON`. Empty for
+  a session never loaded from a file.
 - `_uniqueName(base)` — validates `base` as an addressable name (must parse
   as a `/name` token: letters/digits/`_`, starting with a letter or `_` — no
   dots, which would collide with the `name.param` patch-destination syntax),
@@ -563,8 +770,16 @@ instance rather than holding any state of their own:
   `patch.params.depth` before reading it, rather than assuming every patch is
   shaped like a regular `RibbitPatch` — same guard `reconcilePatches` below
   needs).
-  `sessionToJSON` adds a `version` and `nllc.states` (see `/save` below) on
-  top of the same shape `snapshotSession` returns. Every rampable value comes
+  `sessionToJSON` adds a `version`, `nllc.states` (see `/save` below), and
+  the session's `readme` on top of the same shape `snapshotSession` returns.
+  The readme is deliberately *only* on `sessionToJSON`: it describes the
+  session as a document, so a `/save`d state carries no copy of it.
+  `normalizeReadme` accepts either an array of lines (the readable way to
+  write several lines in JSON, which has no multi-line string literal) or one
+  `\n`-joined string; `loadSession` stores it on `nllc.readme` and pushes it
+  through `nllc.notify(..., "readme")` once the graph exists, and
+  `clearSession` resets it so a file without one can't inherit the previous
+  session's. Every rampable value comes
   from `RibbitParam.get()` (see `param.js`) — already the decoded, user-facing
   number. Every constructible object (a synth, processor, or modulator) is
   tagged with the registry key that built it: `Ribbit.createSynth`/
@@ -583,6 +798,15 @@ instance rather than holding any state of their own:
   by name and re-encodes on load/recall — an event built in code against a
   bare `AudioParam` (no `paramKey`) is skipped, and a rebuilt `once` event
   fires once more.
+- `assertKnownTypes(nllc, snapshot)` (private) — checks every `.type` in a
+  snapshot against the live registries and throws listing all unknown ones
+  at once. Both rebuild paths below call it **before their first mutation**,
+  because neither is atomic: the `create*` calls aren't individually
+  guarded, so one dead type would otherwise throw partway through and leave
+  a graph that's neither the old session nor the new one. It matters more
+  for `applySnapshot`, where almost every `create*` runs inside a deferred
+  `scheduleAt` callback — a throw there would escape a bare timer long after
+  `/recall` had already reported success.
 - `loadSession(nllc, json)` — a hard rebuild: tears down every track/bus/
   modulator/patch and every processor on master, then reconstructs from
   scratch by calling the exact same `nllc.createTrack`/`createBus`/

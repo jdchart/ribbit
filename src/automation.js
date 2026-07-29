@@ -86,7 +86,19 @@ export function setInstant(audioContext, param, value, startTime) {
 // RibbitClock.loopLengthBeats (commands.js's /clock num_beats= at=) — this is
 // the same "step it on a timer" compromise RibbitClock.rampBpm already makes
 // for bpm, generalized to arbitrary deferred work.
-export function scheduleAt(audioContext, time, fn) {
-    const delayMs = Math.max(0, (time - audioContext.currentTime) * 1000);
-    setTimeout(fn, delayMs);
+//
+// Takes the whole `ribbit`, not just its audioContext like its siblings
+// above, because this one needs an *owner*: everything else in this module
+// hands work to the browser's audio thread, where closing the context
+// cancels it, but a setTimeout survives Ribbit.dispose() and would then run
+// its callback against a closed context. Registering the timer id on the
+// engine is what lets dispose() cancel it (and the self-removal on fire is
+// what stops that Set growing for the life of a long session).
+export function scheduleAt(ribbit, time, fn) {
+    const delayMs = Math.max(0, (time - ribbit.audioContext.currentTime) * 1000);
+    const id = setTimeout(() => {
+        ribbit._deferredTimers.delete(id);
+        fn();
+    }, delayMs);
+    ribbit._deferredTimers.add(id);
 };

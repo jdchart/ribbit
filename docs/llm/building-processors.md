@@ -3,6 +3,12 @@
 Full tutorial with rationale: `docs/dev/creating-a-processor.md`. This is the
 condensed recipe.
 
+**Read `docs/llm/catalog.md` first** — it lists every existing synth,
+processor and modulator with its params and options, and has a "which one to
+copy" table. Pick the closest existing processor from there and read that one
+file, rather than trawling `src/`. **And update the catalog** when you're
+done: a new type that isn't in it is invisible to the next session.
+
 A processor extends `RibbitProcessor` (`src/processor.js`),
 which provides `this.input`/`this.output` (both `GainNode`s) and `this.active`
 (routing bypass, handled entirely by the owning `RibbitChannel._rewireChain` —

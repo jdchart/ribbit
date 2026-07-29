@@ -1,5 +1,12 @@
 # Creating a modulator
 
+> **Before you start:** [`../llm/catalog.md`](../llm/catalog.md) lists every
+> synth, processor and modulator already in the engine with its params and
+> options, plus a "which one to copy" table. It's the quickest way to find the
+> closest existing modulator to model yours on. **Remember to add your new modulator
+> to it** once it works — that catalog is what later readers consult instead of
+> the source tree.
+
 A modulator is anything that extends `RibbitModulator`, builds a
 continuously-running Web Audio graph in its constructor (there's no
 per-event `trigger()` — unlike a synth, a modulator is always "on"), connects
@@ -179,15 +186,20 @@ document that it's worth calling out rather than shoehorning into the
   `generateEvents` on the source; no separate command or registry is needed.
 - If a param on this kind of modulator needs real `AudioParam` scheduling
   (ramping, `at=`, `/recall`) but isn't naturally audio-rate — like
-  `RibbitRandomNotes`'s `probability`/`min_gap` — a `ConstantSourceNode` works,
-  but **must be routed through a muted sink into `audioContext.destination`**
-  (see `RibbitRandomNotes._silentSink`), not left fully disconnected: a
-  disconnected node's `setValueAtTime`-scheduled automation can silently
-  never be reflected back in a later `.value` read in some browsers, even
-  though a direct `.value =` assignment always works regardless — see
+  `RibbitRandomNotes`'s `probability`/`min_gap` — use **`RibbitParamSources`**
+  (`param.js`): `this._paramSources = new RibbitParamSources(audioContext)`,
+  then one `this._paramSources.create(value, { min, max })` per param, each
+  returning a ready-made `RibbitParam`. It exists because such a param needs
+  a `ConstantSourceNode` **routed through a muted sink into
+  `audioContext.destination`**, not left fully disconnected: a disconnected
+  node's `setValueAtTime`-scheduled automation can silently never be
+  reflected back in a later `.value` read in some browsers, even though a
+  direct `.value =` assignment always works regardless — see
   `source-overview.md`'s `modulators/randomnotes.js` section for the full
   explanation. Anything extra a modulator owns beyond
-  `this.output` (like those sink nodes) needs its own `dispose()` method,
+  `this.output` (like those sink nodes) needs its own `dispose()` method —
+  with `RibbitParamSources` that's a one-liner,
+  `this._paramSources.dispose()` —
   called by `Ribbit.removeModulator` the same duck-typed-optional way as
   `generateEvents` itself — the base class's generic `output.disconnect()`
   alone won't reach them.

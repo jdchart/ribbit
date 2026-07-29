@@ -562,6 +562,41 @@ needing a ramp duration at all. `commands.js`'s `applyParams` and
 `session.js`'s `applySnapshot` (below) both call into it, rather than each
 keeping its own copy.
 
+### `at=` is about *when*, not about rampability
+
+The three mechanisms above (`scheduleRamp`, `setInstant`, and `scheduleAt`
+below) are implementation details of one user-facing idea: `at=beat` /
+`at=cycle` defers **any** command to a boundary. It is a property of when a
+command takes effect, not of whether the thing being changed happens to sit
+on an `AudioParam`.
+
+That matters because most of what a live-coding session actually does
+mid-performance is discrete — reseed a generator, swap a waveform, mute a
+track, drop in a patch — and all of it wants to land on a boundary rather
+than wherever the keystroke fell. `commands.js`'s `runAt(nllc, timing,
+pending, fn)` is the path for everything that isn't `AudioParam`-backed:
+options, transport, routing, processor inserts, event edits, patches,
+creation and removal. It runs `fn` now or hands it to `scheduleAt`.
+
+Two invariants fall out of that, and both are load-bearing:
+
+1. **Validate before the defer, never inside it.** A throw from a bare timer
+   has no command left to attach itself to. So `choices` are checked before
+   `runAt`, unknown `synth=`/`add_processor=` types are checked explicitly
+   rather than left to the constructor, and `remove_event=`/
+   `remove_automation=` capture the *object* rather than its index (an index
+   can mean a different item by the time the timer fires). This is the same
+   principle `assertKnownTypes` encodes for `session.js`.
+2. **Deferred work needs somewhere to report.** A deferred command returns
+   its "will happen" line immediately, so the real outcome — including a
+   failure — arrives with no command waiting for it. `Ribbit.notify()` /
+   `onMessage` is that channel; without it a deferred failure would vanish,
+   which is worse than an immediate one because the user has already been
+   told the change was scheduled.
+
+The only commands that ignore `at=` are the read-only listings, which have
+nothing to schedule.
+
 ### A third path: structural reconciliation for `/recall`
 
 `session.js`'s `applySnapshot(nllc, snapshot, { startTime, durationSeconds })`

@@ -32,7 +32,7 @@ export { createHarmonyContext, parseDegreeList, resolveDegree } from "./harmony.
 export { RibbitChannel } from "./channel.js";
 export { RibbitTrack } from "./track.js";
 export { RibbitClock } from "./clock.js";
-export { RibbitParam } from "./param.js";
+export { RibbitParam, RibbitParamSources } from "./param.js";
 export { RibbitEvent } from "./event.js";
 export { RibbitSynth } from "./synth.js";
 export { RibbitProcessor } from "./processor.js";
@@ -52,8 +52,11 @@ export {
 // what the ribbit.js registries wire up for the command router.
 export { RibbitOscSynth } from "./synths/oscsynth.js";
 export { RibbitSampler } from "./synths/sampler.js";
+export { RibbitPercSampler, PERC_CATEGORIES } from "./synths/percsampler.js";
 export { RibbitReverb } from "./processors/reverb.js";
 export { RibbitDelay } from "./processors/delay.js";
 export { RibbitLFO } from "./modulators/lfo.js";
 export { RibbitRandomNotes } from "./modulators/randomnotes.js";
 export { RibbitCV } from "./modulators/cv.js";
+export { RibbitMarkovPercs } from "./modulators/markovpercs.js";
+export { RibbitEuclidPercs } from "./modulators/euclidpercs.js";

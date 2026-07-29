@@ -1,5 +1,12 @@
 # Creating a processor
 
+> **Before you start:** [`../llm/catalog.md`](../llm/catalog.md) lists every
+> synth, processor and modulator already in the engine with its params and
+> options, plus a "which one to copy" table. It's the quickest way to find the
+> closest existing processor to model yours on. **Remember to add your new processor
+> to it** once it works — that catalog is what later readers consult instead of
+> the source tree.
+
 A processor is anything that extends `RibbitProcessor`, wires real DSP nodes between
 the inherited `this.input` and `this.output` (both plain `GainNode`s), and
 populates `this.params` with `RibbitParam`s so the console can inspect/control it.

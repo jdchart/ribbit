@@ -183,10 +183,30 @@ export function snapshotSession(ribbit) {
     };
 };
 
-// The full session file shape: a snapshot plus every named state /save has
-// captured, so loading a session file also restores what you could /recall.
+// A session file's optional self-introduction, normalized to an array of
+// lines. Authored either as an array (the readable way to write several lines
+// in JSON, which has no multi-line string literal) or as one "\n"-joined
+// string, since that's what a hand-edited or programmatically-produced file
+// is likely to contain. Deliberately *not* part of snapshotSession: it
+// describes the session as a document, so a /save'd state has no business
+// carrying a copy of it.
+function normalizeReadme(value) {
+    if (value === undefined || value === null) return [];
+    const lines = Array.isArray(value) ? value : String(value).split("\n");
+    return lines.map((line) => String(line));
+};
+
+// The full session file shape: a snapshot, every named state /save has
+// captured (so loading a session file also restores what you could /recall),
+// and the readme, so a session downloaded with /save_json keeps whatever
+// introduction it was opened with.
 export function sessionToJSON(ribbit) {
-    return { version: SESSION_VERSION, ...snapshotSession(ribbit), states: { ...ribbit.states } };
+    return {
+        version: SESSION_VERSION,
+        ...(ribbit.readme.length ? { readme: [...ribbit.readme] } : {}),
+        ...snapshotSession(ribbit),
+        states: { ...ribbit.states },
+    };
 };
 
 function applyChannelParams(channel, data) {
@@ -227,6 +247,50 @@ function clearSession(ribbit) {
     for (const bus of [...ribbit.buses]) ribbit.removeBus(bus);
     for (const modulator of [...ribbit.modulators]) ribbit.removeModulator(modulator);
     for (const processor of [...ribbit.master.processors]) ribbit.removeProcessor(processor);
+    // Cleared here rather than only reassigned at the end of loadSession, so
+    // loading a file with no readme doesn't leave the previous session's one
+    // attached to it (and then serialize it back out on the next save).
+    ribbit.readme = [];
+};
+
+// Checks every `.type` in a snapshot against the live registries BEFORE
+// anything is built or torn down, and throws listing all of them at once.
+//
+// This exists because both rebuild paths are destructive and non-atomic: the
+// create* calls are not individually guarded, so one dead type — the normal
+// consequence of removing a shipped type, see docs/dev/removing-a-type.md —
+// would otherwise throw halfway through and leave a graph that is neither
+// the old session nor the new one. Failing before the first mutation means a
+// bad file costs you nothing: whatever was playing keeps playing.
+//
+// Reporting every bad type at once rather than the first is deliberate too —
+// a session file outside the repo can't be migrated by the engine, so
+// hand-editing the JSON is the only recovery, and that's much easier with
+// the full list than with one name per attempt.
+function assertKnownTypes(ribbit, snapshot) {
+    const problems = [];
+    const check = (kind, known, type, where) => {
+        if (type !== undefined && !known.includes(type)) {
+            problems.push(`${where}: unknown ${kind} type "${type}"`);
+        }
+    };
+    const checkProcessors = (list = [], where) => {
+        for (const data of list) check("processor", ribbit.processorTypes, data.type, `${where} processor "${data.name}"`);
+    };
+
+    checkProcessors(snapshot.master?.processors, "master");
+    for (const data of snapshot.buses ?? []) checkProcessors(data.processors, `bus "${data.name}"`);
+    for (const data of snapshot.tracks ?? []) {
+        check("synth", ribbit.synthTypes, data.synth?.type, `track "${data.name}"`);
+        checkProcessors(data.processors, `track "${data.name}"`);
+    }
+    for (const data of snapshot.modulators ?? []) {
+        check("modulator", ribbit.modulatorTypes, data.type, `modulator "${data.name}"`);
+    }
+
+    if (problems.length) {
+        throw new Error(`session references ${problems.length} unknown type(s):\n  ${problems.join("\n  ")}`);
+    }
 };
 
 // Hard-rebuilds the entire session from a JSON object shaped like
@@ -236,6 +300,7 @@ export function loadSession(ribbit, json) {
     if (json.version !== SESSION_VERSION) {
         throw new Error(`unsupported session version "${json.version}" (expected ${SESSION_VERSION})`);
     }
+    assertKnownTypes(ribbit, json);
 
     clearSession(ribbit);
 
@@ -289,6 +354,13 @@ export function loadSession(ribbit, json) {
     }
 
     ribbit.states = { ...(json.states ?? {}) };
+
+    // Printed last, once the graph it describes actually exists — and pushed
+    // rather than returned, because the two ways in here differ: /load_session
+    // has a command to report to, but /code-editor/<slug>'s auto-load never
+    // had one. notify() is the channel that covers both (see Ribbit.notify).
+    ribbit.readme = normalizeReadme(json.readme);
+    if (ribbit.readme.length) ribbit.notify(ribbit.readme.join("\n"), "readme");
 };
 
 // --- applySnapshot: the diff-and-ramp reconciler behind /recall ---------
@@ -334,7 +406,7 @@ function reconcileProcessors(ribbit, channel, targetList, { startTime, durationS
         return { processor, active: data.active, data };
     });
 
-    scheduleAt(ribbit.audioContext, startTime, () => {
+    scheduleAt(ribbit, startTime, () => {
         for (const processor of toRemove) ribbit.removeProcessor(processor);
         for (const processor of [...channel.processors]) channel.removeProcessor(processor.id);
         for (const { processor, active, data } of finalOrder) {
@@ -356,7 +428,7 @@ function reconcileProcessors(ribbit, channel, targetList, { startTime, durationS
 // choreography here — matched sends' gain still ramps, but add/remove is a
 // plain structural swap at startTime.
 function reconcileSends(ribbit, channel, targetList, { startTime }) {
-    scheduleAt(ribbit.audioContext, startTime, () => {
+    scheduleAt(ribbit, startTime, () => {
         const targetByName = new Map(targetList.map((s) => [s.destName, s]));
         for (const send of [...channel.sends]) {
             if (!targetByName.has(send.destName)) channel.removeSend(send.id);
@@ -375,7 +447,7 @@ function reconcileSends(ribbit, channel, targetList, { startTime }) {
 function reconcileMaster(ribbit, data, opts) {
     applyParamsSnapshot(ribbit, ribbit.master.params, data.params, opts);
     reconcileProcessors(ribbit, ribbit.master, data.processors ?? [], opts);
-    scheduleAt(ribbit.audioContext, opts.startTime, () => {
+    scheduleAt(ribbit, opts.startTime, () => {
         ribbit.master.automation = rebuildAutomation(ribbit.master, data.automation);
     });
 };
@@ -395,7 +467,7 @@ function reconcileChannelList(ribbit, live, targetList, { create, remove, onMatc
         const data = targetByName.get(channel.name);
         if (!data) {
             rampOrSet(ribbit, channel.params.gain, 0, opts);
-            scheduleAt(ribbit.audioContext, opts.startTime + opts.durationSeconds, () => remove(channel));
+            scheduleAt(ribbit, opts.startTime + opts.durationSeconds, () => remove(channel));
             continue;
         }
 
@@ -404,7 +476,7 @@ function reconcileChannelList(ribbit, live, targetList, { create, remove, onMatc
         rampOrSet(ribbit, channel.params.gain, data.params.gain, opts);
         reconcileProcessors(ribbit, channel, data.processors ?? [], opts);
         if (data.sends) reconcileSends(ribbit, channel, data.sends, opts);
-        scheduleAt(ribbit.audioContext, opts.startTime, () => {
+        scheduleAt(ribbit, opts.startTime, () => {
             channel.automation = rebuildAutomation(channel, data.automation);
         });
         onMatch?.(channel, data, opts);
@@ -412,7 +484,7 @@ function reconcileChannelList(ribbit, live, targetList, { create, remove, onMatc
 
     for (const data of targetList) {
         if (live.some((c) => c.name === data.name)) continue;
-        scheduleAt(ribbit.audioContext, opts.startTime, () => {
+        scheduleAt(ribbit, opts.startTime, () => {
             const channel = create(data);
             const instantOpts = { startTime: opts.startTime, durationSeconds: 0 };
             const { gain: targetGain, ...restParams } = data.params;
@@ -434,10 +506,10 @@ function reconcileModulators(ribbit, targetList, opts) {
     for (const modulator of [...ribbit.modulators]) {
         const data = targetByName.get(modulator.name);
         if (!data) {
-            scheduleAt(ribbit.audioContext, opts.startTime + opts.durationSeconds, () => ribbit.removeModulator(modulator));
+            scheduleAt(ribbit, opts.startTime + opts.durationSeconds, () => ribbit.removeModulator(modulator));
         } else {
             applyParamsSnapshot(ribbit, modulator.params, data.params, opts);
-            scheduleAt(ribbit.audioContext, opts.startTime, () => {
+            scheduleAt(ribbit, opts.startTime, () => {
                 applyOptionsSnapshot(modulator, data.options);
                 modulator.automation = rebuildAutomation(modulator, data.automation);
             });
@@ -446,7 +518,7 @@ function reconcileModulators(ribbit, targetList, opts) {
 
     for (const data of targetList) {
         if (ribbit.modulators.some((m) => m.name === data.name)) continue;
-        scheduleAt(ribbit.audioContext, opts.startTime, () => {
+        scheduleAt(ribbit, opts.startTime, () => {
             const modulator = ribbit.createModulator(data.type, { name: data.name, ...data.options });
             applyParamsSnapshot(ribbit, modulator.params, data.params, { startTime: opts.startTime, durationSeconds: 0 });
             modulator.automation = rebuildAutomation(modulator, data.automation);
@@ -471,7 +543,7 @@ function reconcilePatches(ribbit, targetList, opts) {
             // An event patch (no depth) has nothing to fade — it's removed
             // outright once the fade window elapses, same timing either way.
             if (patch.params.depth) rampOrSet(ribbit, patch.params.depth, 0, opts);
-            scheduleAt(ribbit.audioContext, opts.startTime + opts.durationSeconds, () => ribbit.removePatch(patch));
+            scheduleAt(ribbit, opts.startTime + opts.durationSeconds, () => ribbit.removePatch(patch));
         } else if (patch.params.depth) {
             rampOrSet(ribbit, patch.params.depth, data.depth, opts);
         }
@@ -479,7 +551,7 @@ function reconcilePatches(ribbit, targetList, opts) {
 
     for (const data of targetList) {
         if (ribbit.patches.some((p) => key(p) === key(data))) continue;
-        scheduleAt(ribbit.audioContext, opts.startTime, () => {
+        scheduleAt(ribbit, opts.startTime, () => {
             const patch = ribbit.createPatch({ sourceName: data.sourceName, destName: data.destName, depth: 0 });
             if (patch.params.depth) rampOrSet(ribbit, patch.params.depth, data.depth, opts);
         });
@@ -494,6 +566,13 @@ function reconcilePatches(ribbit, targetList, opts) {
 // (default 0) is how long every ramp/fade takes — 0 means every change is
 // still deferred to `startTime` but happens as an instant jump, not a ramp.
 export function applySnapshot(ribbit, snapshot, { startTime, durationSeconds = 0 } = {}) {
+    // Same guard loadSession makes, and for a sharper reason: almost every
+    // create* call below runs inside a deferred scheduleAt callback, so an
+    // unknown type here wouldn't just half-apply the snapshot — it would
+    // throw out of a bare timer, long after /recall returned "ok", with
+    // nothing left to catch it.
+    assertKnownTypes(ribbit, snapshot);
+
     const t0 = startTime ?? ribbit.audioContext.currentTime;
     const opts = { startTime: t0, durationSeconds };
 
@@ -501,13 +580,13 @@ export function applySnapshot(ribbit, snapshot, { startTime, durationSeconds = 0
         if (durationSeconds > 0 && snapshot.clock.bpm !== ribbit.clock.bpm) {
             ribbit.clock.rampBpm(snapshot.clock.bpm, durationSeconds, { startTime: t0 });
         } else {
-            scheduleAt(ribbit.audioContext, t0, () => ribbit.clock.setBpm(snapshot.clock.bpm));
+            scheduleAt(ribbit, t0, () => ribbit.clock.setBpm(snapshot.clock.bpm));
         }
-        scheduleAt(ribbit.audioContext, t0, () => ribbit.clock.setLoopLengthBeats(snapshot.clock.loopLengthBeats));
+        scheduleAt(ribbit, t0, () => ribbit.clock.setLoopLengthBeats(snapshot.clock.loopLengthBeats));
     }
 
     if (snapshot.harmony) {
-        scheduleAt(ribbit.audioContext, t0, () => {
+        scheduleAt(ribbit, t0, () => {
             ribbit.harmony.root = snapshot.harmony.root;
             ribbit.harmony.scale = [...snapshot.harmony.scale];
         });
@@ -543,7 +622,7 @@ export function applySnapshot(ribbit, snapshot, { startTime, durationSeconds = 0
             // is pressed while everything else correctly waits for the
             // boundary. Same setTimeout compromise every other structural
             // change here makes.
-            scheduleAt(ribbit.audioContext, matchOpts.startTime, () => {
+            scheduleAt(ribbit, matchOpts.startTime, () => {
                 if (!typeMatches) {
                     ribbit.setTrackSynth(track, data.synth.type, data.synth.options);
                     for (const [key, value] of Object.entries(data.synth.params)) {

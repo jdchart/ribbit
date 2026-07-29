@@ -13,3 +13,9 @@ of it, see the [nllc](../../nllc/docs/) docs.
 - **[docs/llm](llm/)** — concise, context-window-friendly summaries meant to be
   fed to an LLM (a coding assistant, or a host app's natural-language layer)
   instead of the full source.
+
+Looking for **what the engine can already do**? [`llm/catalog.md`](llm/catalog.md)
+is a one-page list of every synth, processor and modulator with its params and
+options, plus a "which one to copy" table for building a new one. Despite
+living under `llm/`, it's the fastest orientation for a human too — and it must
+be kept in step whenever a type is added or removed.
