@@ -22,6 +22,11 @@ export class RibbitClock {
         this.startTime = 0;
         this.scheduledUpTo = 0;
 
+        // The highest loop index onCycle() has already been fired for, so a
+        // boundary is announced exactly once however many scheduling passes
+        // happen to land inside it. -1 means "not even cycle 0 yet".
+        this._notifiedCycle = -1;
+
         this._bpmRampTimer = null;
     };
 
@@ -45,6 +50,10 @@ export class RibbitClock {
         this.running = true;
         this.startTime = this.audioContext.currentTime;
         this.scheduledUpTo = 0;
+        // Beat position rewinds to 0, so cycle numbering does too — without
+        // this, a restart would never re-announce cycle 0 and a unit that
+        // regenerates on the boundary would sit on a stale pattern.
+        this._notifiedCycle = -1;
         // A (re)start rewinds the absolute beat position to 0 — any unit
         // holding its own absolute-beat state (e.g. RibbitRandomNotes'
         // candidate-grid cursor) must reset it, or after a /stop /start it
@@ -190,6 +199,33 @@ export class RibbitClock {
             const loopBeatStart = loopIndex * this.loopLengthBeats;
             const rangeStart = Math.max(fromBeat, loopBeatStart) - loopBeatStart;
             const rangeEnd = Math.min(toBeat, loopBeatStart + this.loopLengthBeats) - loopBeatStart;
+
+            // A new loop is about to be scheduled: announce the boundary to
+            // any unit that wants to know, *before* that loop's events are
+            // read. Optional and duck-typed, like generateEvents/onClockStart.
+            //
+            // This is the hook for "change something every N cycles" — a
+            // generator re-rolling its pattern (RibbitPatternVariator), a
+            // section advancing. It is deliberately not needed for merely
+            // *playing* a pattern: generateEvents() takes absolute beats, so
+            // all three older generators index straight off the step number
+            // and need no boundary notification at all.
+            //
+            // Two properties worth knowing. It fires a lookahead window
+            // *early*, in the same pass that schedules the cycle's first
+            // events, which is exactly what a regenerating unit needs (it
+            // must have rewritten its pattern before that pattern is read).
+            // And cycleIndex is monotonic but not necessarily contiguous: if
+            // a stall swallowed whole cycles, the skipped ones are not
+            // replayed — regenerating N times for cycles nobody will hear is
+            // strictly worse than landing on the current one.
+            if (loopIndex > this._notifiedCycle) {
+                this._notifiedCycle = loopIndex;
+                for (const unit of this.units) {
+                    if (unit.active === false) continue;
+                    unit.onCycle?.(loopIndex);
+                }
+            }
 
             for (const unit of this.units) {
                 // A paused track's synth, or a bypassed processor, stops being

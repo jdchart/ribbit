@@ -64,7 +64,7 @@ params:
 commands:
   gain=<val> / pan=<val>          set instantly; add a trailing duration to ramp, e.g. gain=0 3 (3s) or gain=0 4b (4 beats)
   at=beat|cycle                    defer ANY command on this line — a set, a ramp, or a discrete change like start/stop/synth=/an option — to the next beat/loop boundary instead of firing now
-  synth=<type>                     swap this track's synth (oscsynth, sampler, percsampler)
+  synth=<type>                     swap this track's synth (oscsynth, sampler, percsampler, karplus)
   add_event beat= pitch=|degree= velocity= duration=   append a note event (all optional except beat)
   ...
 ```
@@ -84,13 +84,13 @@ below).
 |---|---|
 | `/start` | Resumes the `AudioContext` and starts the clock. |
 | `/stop` | Suspends the `AudioContext` and stops the clock. `/stop at=cycle` lets the current loop finish first. |
-| `/add_track [name=] [synth=] [out=] [...synth options]` | Creates a track. `name` defaults to `"track"` (de-duplicated as `track_2`, `track_3`, ... if taken by *any* existing object or reserved command name — see [Names](#names); pass `name=` explicitly for a nicer name). `synth` selects the synth type (default `oscsynth`; see [objects.md](objects.md)). `out` sets where its one default send feeds (default `master`; see [Buses and sends](#buses-and-sends)). Any other params are passed straight to the synth's constructor (e.g. `synth=oscsynth waveform=square`). A fresh track's synth starts with **no events** — see `add_event` below. |
+| `/add_track [name=] [synth=] [out=] [...synth options]` | Creates a track. `name` defaults to `"track"` (de-duplicated as `track_2`, `track_3`, ... if taken by *any* existing object or reserved command name — see [Names](#names); pass `name=` explicitly for a nicer name). `synth` selects the synth type (default `oscsynth`; see [objects.md](objects.md)). `out` sets where its one default send feeds (default `master`; see [Buses and sends](#buses-and-sends)). Any other params are passed straight to the synth's constructor (e.g. `synth=oscsynth waveform=square`). A fresh track's synth starts with **no events** — see `add_event` below. **Refuses `at=`** — see [The one exception](#the-one-exception-creating-things). |
 | `/tracks` | Lists every track's summary line (same format as running a track command with no params). |
-| `/add_bus [name=] [out=]` | Creates a bus — an empty channel (fader/pan/inserts/sends, no synth) that exists purely to be a shared send destination for other tracks/buses (see [Buses and sends](#buses-and-sends)). `name` defaults to `"bus"` (de-duplicated, like tracks). `out` sets where its one default send feeds (default `master`). |
+| `/add_bus [name=] [out=]` | Creates a bus — an empty channel (fader/pan/inserts/sends, no synth) that exists purely to be a shared send destination for other tracks/buses (see [Buses and sends](#buses-and-sends)). `name` defaults to `"bus"` (de-duplicated, like tracks). `out` sets where its one default send feeds (default `master`). **Refuses `at=`** — see [The one exception](#the-one-exception-creating-things). |
 | `/buses` | Lists every bus's summary line. |
 | `/clock [bpm=] [num_beats=]` | With no params, reports the current `bpm=... num_beats=...`. `bpm=<n>` changes tempo (glitch-free while running — the current playback position is preserved); it also accepts a trailing ramp duration (`/clock bpm=140 8`, ramps tempo smoothly over 8 seconds) and `at=beat`/`at=cycle` to defer the start — see [Ramps](#ramps). `num_beats=<n>` changes the loop length in beats (defaults to 4) and is **not** rampable (a shifting loop length has no sensible meaning — a ramp spec there is rejected with a message), though it still accepts `at=` like anything else. Both are runtime-mutable at any time. |
 | `/harmony [root=] [scale=]` | With no params, reports the shared harmony context (`root=60 scale=0,1,2,...`). `root=<midi note>` moves the key's root; `scale=<comma-separated degrees>` (e.g. `scale=0,2,4,5,7,9,11` for major) changes which semitone offsets the scale contains. Because every event's `degree=` (and every `randomnotes` stream) resolves against this context **at trigger time**, a change retunes already-playing patterns live, mid-loop — see [objects.md](objects.md#events). Neither is rampable, but both take `at=beat`/`at=cycle` — `/harmony root=64 at=cycle` is the usual way to change key, landing it on the downbeat. |
-| `/add_modulator [type=] [name=] [...modulator options]` | Creates a modulator — a continuous control source you can patch into any parameter (see [Modulators and patches](#modulators-and-patches) below). `type` defaults to `lfo`. Any other params are passed to the modulator's constructor (e.g. `type=lfo freq=2 name=lfo1`). |
+| `/add_modulator [type=] [name=] [...modulator options]` | Creates a modulator — a continuous control source you can patch into any parameter (see [Modulators and patches](#modulators-and-patches) below). `type` defaults to `lfo`. Any other params are passed to the modulator's constructor (e.g. `type=lfo freq=2 name=lfo1`). **Refuses `at=`** — see [The one exception](#the-one-exception-creating-things). |
 | `/modulators` | Lists every modulator's summary line (same format as running a modulator command with no params/`help`). |
 | `/patch source=<name> dest=<name.param> [depth=]` | Creates a patch — see [Modulators and patches](#modulators-and-patches). |
 | `/patch id=<id> [depth=]` | Adjusts an existing patch's depth (rampable, `at=` deferrable). With no `depth=`, reports the patch's summary. |
@@ -393,7 +393,9 @@ being an `AudioParam` behind it:
 ```
 
 Only the read-only listing commands (`/tracks`, `/patches`, `events`,
-`automations`, `help`, ...) ignore it — there's nothing to schedule.
+`automations`, `help`, ...) ignore it — there's nothing to schedule — and the
+three creation commands actively refuse it (see
+[The one exception](#the-one-exception-creating-things) below).
 
 A deferred command replies twice. First, immediately, with what *will* happen:
 
@@ -420,9 +422,36 @@ multi-command-per-line syntax (see [Syntax](#syntax)) to fire several
 scheduled changes together:
 `/track_1 gain=0 8 at=cycle /reverb wet=0.9 6b at=cycle`.
 
-One caveat: a deferred *creation* (`/add_track name=x at=cycle`) can't report
-the name it will get, and the object doesn't exist until it fires — so it
-can't be referred to by a later command on the same line.
+### The one exception: creating things
+
+`/add_track`, `/add_bus` and `/add_modulator` **refuse `at=`** with an error:
+
+```
+> /add_track name=x at=cycle
+add_track can't be deferred — a deferred creation has no name to report and
+isn't addressable until it fires. Create it now, then use at= on the command
+that wires it up.
+```
+
+Everywhere else, `at=` answers "when should this change take effect". But a
+creation's effect is *a name starting to exist*, and a name that will exist
+later is unusable in every way that matters: the command can't tell you what it
+created (which is its entire output, and an auto-generated name isn't known
+until the object is built), and a later command on the same line can't refer to
+it — `/add_track name=x at=cycle /x gain=0.5` would silently half-work.
+
+Deferring it also buys nothing musical. A fresh track, bus or modulator makes
+no sound until something is wired into it, so **create now and defer the
+wiring** — `/patch`, `add_processor=` and `start`/`stop` all take `at=`, and
+that's the gesture that was actually wanted:
+
+```
+/add_modulator type=euclidpercs name=grid
+/patch source=grid dest=drums.notes at=cycle
+```
+
+Refusing loudly rather than quietly ignoring it is the point: an `at=` that
+silently does nothing is the worst of the three possible behaviours.
 
 ## Params vs. options
 

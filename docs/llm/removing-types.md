@@ -66,7 +66,10 @@ Demo material lives in the host app, not the engine: the
 `src/routes/code-editor/<type>/` route, `static/sessions/<type>-demo.json`, the
 `<a class="session-link">` block in `src/routes/+page.svelte`, route/asset
 listings in `nllc/README.md` and `nllc/docs/{user,dev,llm}/`, and any
-`static/` assets only that type fetched. Stale `.svelte-kit/` references are
+`static/` assets only that type fetched. Two types own a `static/` tree **plus
+a manifest route**, which must go together: `percsampler`
+(`static/samples/` + `routes/samples/manifest.json/`) and `patternvariator`
+(`static/patterns/` + `routes/patterns/manifest.json/`). Stale `.svelte-kit/` references are
 build output and regenerate.
 
 ## 6. Verify

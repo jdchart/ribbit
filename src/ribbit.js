@@ -6,11 +6,13 @@ import { RibbitDelay } from "./processors/delay.js";
 import { RibbitOscSynth } from "./synths/oscsynth.js";
 import { RibbitSampler } from "./synths/sampler.js";
 import { RibbitPercSampler } from "./synths/percsampler.js";
+import { RibbitKarplus } from "./synths/karplus.js";
 import { RibbitLFO } from "./modulators/lfo.js";
 import { RibbitRandomNotes } from "./modulators/randomnotes.js";
 import { RibbitCV } from "./modulators/cv.js";
 import { RibbitMarkovPercs } from "./modulators/markovpercs.js";
 import { RibbitEuclidPercs } from "./modulators/euclidpercs.js";
+import { RibbitPatternVariator } from "./modulators/patternvariator.js";
 import { RibbitPatch, RibbitEventPatch } from "./patch.js";
 import { createHarmonyContext } from "./harmony.js";
 
@@ -29,6 +31,7 @@ const SYNTH_TYPES = {
     oscsynth: RibbitOscSynth,
     sampler: RibbitSampler,
     percsampler: RibbitPercSampler,
+    karplus: RibbitKarplus,
 };
 
 const MODULATOR_TYPES = {
@@ -37,6 +40,7 @@ const MODULATOR_TYPES = {
     cv: RibbitCV,
     markovpercs: RibbitMarkovPercs,
     euclidpercs: RibbitEuclidPercs,
+    patternvariator: RibbitPatternVariator,
 };
 
 // Every name the console router dispatches before it ever looks at objects:

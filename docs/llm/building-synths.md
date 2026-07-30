@@ -60,8 +60,9 @@ params, the same way a processor does (see `docs/llm/building-processors.md`)
 through the track's own name automatically, so `/mytrack cutoff=800 2b`
 works with no `commands.js` change, and they're valid `/patch` destinations
 too (`dest=mytrack.cutoff`, via `_resolveDest`'s `channel.source.params`
-fallback). `synths/percsampler.js` is the worked example — it declares
-`dynamics`/`pan_spread`/`speed_spread`. Note a synth param needs a real
+fallback). `synths/percsampler.js` and `synths/karplus.js` are the worked examples —
+the former declares `dynamics`/`pan_spread`/`speed_spread`, the latter
+`damping`/`decay`/`brightness`. Note a synth param needs a real
 `AudioParam` behind it; if the value has no node of its own, use
 `RibbitParamSources` (`param.js`):
 
@@ -105,9 +106,9 @@ one-shot nodes (an always-running `BufferSourceNode`/`ConstantSourceNode` —
 an idle noise floor, a free-running oscillator), implement `dispose()` to
 stop it — `Ribbit.removeTrack`/`setTrackSynth` call it duck-typed (like
 `RibbitRandomNotes.dispose()` already does for modulators), so it only needs
-implementing when there's actually something to tear down. Neither built-in
-synth does, so there's no in-tree example to copy from; `randomnotes` is the
-nearest one.
+implementing when there's actually something to tear down. `percsampler` and
+`karplus` both implement it, in each case only to tear down their
+`RibbitParamSources` sinks (a one-liner).
 
 Optional: implement `describeState()` returning a short string, and
 `commands.js`'s `paramObjectSummary` will append it to the object's one-line
@@ -119,5 +120,20 @@ If your synth loads external assets, note the host contract precedent:
 `RibbitPercSampler` fetches a manifest (`/samples/manifest.json`, overridable
 per instance) because a browser can't list a directory, and degrades to an
 empty kit plus a `console.warn` rather than throwing out of a constructor.
+`RibbitPatternVariator` follows the identical shape for `/patterns/manifest.json`
+— keep any third one the same, since a host author should learn one rule.
+
+**Polyphony and buffer synthesis.** `synths/karplus.js` is the only polyphonic
+synth (a chord is just several overlapping one-shot `BufferSource`s — no voice
+allocator to run out) and the only one that *synthesizes into an `AudioBuffer`*
+with a JS loop rather than building a node graph. Copy that approach when a
+node graph can't express the algorithm: the specific reason there is that Web
+Audio forces any feedback cycle containing a `DelayNode` to at least one render
+quantum (128 samples) of delay, capping a node-graph Karplus-Strong around
+375Hz. Rendering directly is exact at any pitch and — importantly — needs no
+`AudioWorklet` module for the host to serve, which would be a new kind of host
+obligation (the engine only ever asks for JSON manifests). Cost is well under a
+millisecond per note; don't cache the result unless the algorithm is
+deterministic, since a cache makes every repeat of a note bit-identical.
 
 Removing a type again later: `docs/llm/removing-types.md`.

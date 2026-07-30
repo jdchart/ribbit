@@ -64,7 +64,7 @@ so don't override it. An option can't be *ramped*, but it can still be
 whether sweeping the value is musical, not whether it needs timing.
 Real examples in tree: `modulators/cv.js` is the smallest (a
 `ConstantSourceNode`, one unbounded param, no options — start here),
-`lfo.js` adds an option and a bounded param, and the three generators below
+`lfo.js` adds an option and a bounded param, and the four generators below
 are the event-generating shape.
 
 For a param with no `AudioParam` of its own, use `RibbitParamSources`
@@ -82,8 +82,11 @@ A modulator can instead generate discrete events (notes) rather than a
 continuous signal — see `modulators/randomnotes.js` (`RibbitRandomNotes`) for
 the pattern: expose `generateEvents(fromBeat, toBeat)` (called by
 `RibbitClock` every tick with an absolute, non-loop-relative beat range — see
-clock.js) returning whatever `RibbitEvent`s should fire, and initialize
-`this.eventDestinations = []`. If the generator keeps absolute-beat state
+clock.js) returning whatever `RibbitEvent`s should fire. **`eventDestinations`
+is already on the base class — do not declare it yourself** (it used to be
+per-subclass; omitting it failed at *patch* time with an unattributable "cannot
+read properties of undefined", taking out every `.notes` patch at session
+load). If the generator keeps absolute-beat state
 (a "next candidate beat" cursor etc.), also implement `onClockStart()`
 (duck-typed, called by `RibbitClock.start()`) to reset it — a clock (re)start
 rewinds absolute beats to 0. Such a modulator has no meaningful continuous
@@ -96,22 +99,32 @@ Several generators may feed the same track (only an exact duplicate
 source→dest patch is rejected), which is how a fixed backbone plus a
 decorating layer is built.
 
-Three generators exist, and they differ in *what decides whether a hit
-happens* — worth knowing before adding a fourth, since the useful axis is
+Four generators exist, and they differ in *what decides whether a hit
+happens* — worth knowing before adding a fifth, since the useful axis is
 usually a new answer to that question rather than a new sound:
 `randomnotes` rolls fresh dice per slot (never repeats), `markovpercs` looks
 at the previous step (fixed pattern, no notion of bar position),
 `euclidpercs` looks at the step's own index (exactly repeatable, can hold a
-downbeat). A step-string parser (`kicks=x..x..x.`) is the obvious unbuilt
-one, and would slot into the same contract.
+downbeat), `patternvariator` reads **a file a person wrote** and varies it
+(the only one whose material is authored rather than derived — see
+`docs/llm/building-patterns.md`). The step-string gap is closed: the `drums`
+pattern kind *is* one, in a file rather than on the command line, since a
+16-character grid doesn't survive `splitCommands`.
 
 A drum generator should drive `RibbitPercSampler` through its published slot
 contract rather than emitting raw slot numbers: store `{ category, variant }`
 and resolve `category * stride + variant` at delivery, where `stride` comes
-from the destination's `slotsPerCategory` when it publishes one (see
-`_stride()` in `markovpercs.js`/`euclidpercs.js`). That's what lets one
+from the destination's `slotsPerCategory` when it publishes one. `_stride()`
+is **inherited from `RibbitModulator`** — it describes the destination, not
+your generation strategy, so don't reimplement it. That's what lets one
 pattern drive a kit with 1 or 8 slots per category, and lets two generators
 share one kit.
+
+For seeded randomness, import `mulberry32`/`randomSeed` from `random.js`
+rather than writing your own. Reach for `Math.random()` only for things that
+deliberately *shouldn't* survive a reload (euclidpercs' live `dropout`) — the
+choice of generator is the choice of whether the result is part of the
+document.
 
 Optional: implement `describeState()` returning a short string, appended to
 the object's one-line console summary by `commands.js`'s
@@ -124,6 +137,7 @@ thought: a value only consulted when the pattern is *regenerated* should be
 an option, even if it's numeric, because a ramp on it would look like a
 control that does nothing. Reserve params for values read fresh inside
 `generateEvents` — `markovpercs` splits exactly this way (`style`/`seed`/
-`steps` are options; `velocity`/`swing` are params).
+`steps` are options; `velocity`/`swing` are params, and `patternvariator`
+splits the same way with `seed`/`variation`/`density`).
 
 Removing a type again later: `docs/llm/removing-types.md`.

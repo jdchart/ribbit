@@ -155,6 +155,65 @@ manifest gets an empty kit and a console warning, not an error — set
 > truncated result rather than loading nonsense. Use `samples=random` at the
 > console.
 
+### `karplus` — `RibbitKarplus`
+
+> A polyphonic Karplus-Strong plucked string: a noise burst through a feedback
+> delay line, rendered per note. Plays chords and melodies; degrees resolve
+> against the shared harmony context.
+
+**The only polyphonic synth** — a chord is just several overlapping notes at
+the same beat, with no voice limit to run out of. That makes it the natural
+partner for a `notes` [pattern](patterns.md), and the thing to point
+`patternvariator` at when you want harmony rather than drums.
+
+Karplus-Strong is a physical model, and a strikingly simple one: fill a short
+delay line with noise, then read it out repeatedly while feeding each sample
+back in averaged with its neighbour. The noise burst is the pluck; the
+averaging is the string losing its high harmonics first, which is what makes it
+sound like a string rather than a filtered oscillator.
+
+Notes **ring for their natural decay** rather than being cut off at the end of
+the written note — that's how a plucked string behaves. A `duration` shorter
+than the decay is instead read as *muting* the string: a short fade rather than
+a hard stop.
+
+| Constructor option | Default | Runtime **param** | Meaning |
+|---|---|---|---|
+| `damping` | `0.35` | `damping` | How fast the high harmonics are lost. `0` is a bright, almost metallic string; `1` a dull thud. Clamped `0..1`. Rampable. |
+| `decay` | `2` | `decay` | Seconds for the note to fall by 60dB. Pitch-compensated, so a high note dies away at the same rate as a low one. Clamped `0.05..8`. Rampable. |
+| `brightness` | `0.6` | `brightness` | Tone of the pluck *itself*, before the string gets hold of it — `1` is the raw burst, lower values pre-soften it. Distinct from `damping`, which governs what happens after. Clamped `0..1`. Rampable. |
+
+| Constructor option | Default | Runtime option | Meaning |
+|---|---|---|---|
+| `excitation` | `"noise"` | `excitation` | What fills the delay line at the pluck. `noise` is the classic broadband burst; `pulse` is a single impulse, exciting the same harmonics in phase for a much cleaner, more harp-like attack. Not rampable. |
+
+An event's `pitch` is a MIDI note number; `degree=` resolves against the shared
+harmony context instead, which is what a `notes` pattern emits.
+
+```
+/add_track name=keys synth=karplus
+/keys add_event beat=0 degree=0
+/keys add_event beat=0 degree=3
+/keys add_event beat=0 degree=7
+/keys damping=0.9 8b            # let the strings go dull over 8 beats
+/keys excitation=pulse at=cycle # cleaner attack from the next downbeat
+```
+
+All three params are valid `/patch` destinations, so an LFO on `brightness`
+gives you a slowly-breathing string:
+
+```
+/add_modulator type=lfo name=sway freq=0.05
+/patch source=sway dest=keys.brightness depth=0.25
+```
+
+> **A note on the top octave.** Each pluck is rendered into a buffer rather
+> than built as a node graph — Web Audio forces any feedback loop containing a
+> delay to a minimum length, which would cap the instrument around F#4. The
+> trade-off is that pitch quantizes to a whole number of samples: accurate
+> within a few cents up to C6, drifting to about a fifth of a semitone by G6.
+> Inaudible in normal use, worth knowing if you write very high parts.
+
 ## Buses (`/add_bus`)
 
 A bus is an empty channel — fader, pan, an insert chain, sends — with no
@@ -212,26 +271,34 @@ processor, but it never joins any channel's chain. On its own it does
 nothing audible; it only matters once patched into a parameter with
 `/patch` — see [commands.md](commands.md#modulators-and-patches).
 
-There are five, in two shapes. `lfo` and `cv` both produce a **continuous
+There are six, in two shapes. `lfo` and `cv` both produce a **continuous
 signal** patched into a parameter (`lfo` moves by itself, `cv` holds
-whatever you set); `randomnotes`, `markovpercs` and `euclidpercs` instead
-generate **discrete notes** and patch into a track's synth rather than a
-parameter.
+whatever you set); `randomnotes`, `markovpercs`, `euclidpercs` and
+`patternvariator` instead generate **discrete notes** and patch into a track's
+synth rather than a parameter.
 
-The three generators differ in *what decides whether a hit happens*:
+The four generators differ in *what decides whether a hit happens*:
 
 | Generator | Decides from | Repeats? |
 |---|---|---|
 | `randomnotes` | a fresh dice roll at each slot | never — no two bars alike |
 | `markovpercs` | the previous step (a Markov chain) | yes, one fixed pattern until reseeded |
 | `euclidpercs` | the step's own index (euclidean distribution) | yes, exactly — it can hold a downbeat |
+| `patternvariator` | **a file you wrote**, plus seeded variation | yes, one fixed take until reseeded |
 
-That last distinction is the important one: `markovpercs` has no notion of
-where in the bar it is, so it produces convincing *texture* but can't place a
-kick on every beat; `euclidpercs` decides each step from its position, so it
-can. They're designed to be used together — a euclidean backbone with a Markov
-layer adding ghost notes around it. Several generators may feed the same
-track (only an exact duplicate patch is rejected).
+Two distinctions matter here. First, `markovpercs` has no notion of where in
+the bar it is, so it produces convincing *texture* but can't place a kick on
+every beat; `euclidpercs` decides each step from its position, so it can.
+They're designed to be used together — a euclidean backbone with a Markov layer
+adding ghost notes around it.
+
+Second, `patternvariator` is the only one whose material is **authored rather
+than derived**. The other three invent a pattern from a rule; this one plays
+something you wrote in a file and varies it. Reach for it when you know what
+you want to hear, and for the others when you want to be surprised.
+
+Several generators may feed the same track (only an exact duplicate patch is
+rejected).
 
 ### `lfo` — `RibbitLFO` (default)
 
@@ -435,6 +502,106 @@ percs  ..x..x..X..x..x.
 Two example sessions ship with the reference app: `euclid-demo` (this
 generator alone) and `euclid-ghosts` (a euclidean backbone with `markovpercs`
 adding ghost notes on top).
+
+### `patternvariator` — `RibbitPatternVariator`
+
+> Plays a hand-written pattern from the host's pattern library (drum lanes, or
+> chords/melodies as scale degrees) and generates seeded variations on it.
+
+The only generator that plays material **you wrote**. It loads a pattern file
+(see **[patterns.md](patterns.md)** for how to write one), then varies it — so
+a part can stay recognisably itself while never being quite identical twice.
+
+It drives either shape of material: a `drums` pattern feeds a
+[`percsampler`](#percsampler--ribbitpercsampler) through the same slot contract
+every other drum generator uses, and a `notes` pattern feeds any pitched synth
+(most naturally [`karplus`](#karplus--ribbitkarplus), which plays chords).
+
+**Selecting a pattern:**
+
+| Constructor option | Default | Runtime option | Meaning |
+|---|---|---|---|
+| `pack` | random | `pack` | Which folder under `/patterns/` to draw from. `random` picks one. Changing it re-picks the pattern too, since a name only means something inside its pack. Not rampable. |
+| `pattern` | random | `pattern` | Which pattern in the pack, by bare name (`boom-bap`, not `hiphopdrums/boom-bap.json`). `random` re-picks. Always *reports* the concrete name in use, so a saved session reloads the same pattern rather than rolling a new one. Not rampable. |
+
+**Shaping the variation** — all options, all regenerating when set:
+
+| Constructor option | Default | Runtime option | Meaning |
+|---|---|---|---|
+| `variation` | `0.3` | `variation` | How far from the source to stray, `0..1`. `0` plays the file exactly as written. Not rampable — see the note below. |
+| `density` | `1` | `density` | Thins the result without changing its character: every surviving event keeps its place with this probability. `0` silences it. Not rampable. |
+| `seed` | random | `seed` | PRNG seed. A number, or the literal `random` — the "give me another take" gesture. Not rampable. |
+| `step_beats` | the file's own | `step_beats` | Overrides the pattern's grid resolution, so one file can be played at half or double time without editing it. Not rampable. |
+| `transpose` | `0` | `transpose` | Shifts pitched material by whole scale **degrees** (not semitones), so it stays in key. Ignored for drum patterns, where a degree is a slot index. Not rampable. |
+| `per_category` | `4` | `per_category` | Fallback slot stride, used only when the patched destination doesn't publish its own. Not rampable. |
+
+**Live controls** — read fresh on every tick:
+
+| Constructor option | Default | Runtime **param** | Meaning |
+|---|---|---|---|
+| `velocity` | `1` | `velocity` | Scales the pattern's own velocity. Clamped `0..1`. Rampable. |
+| `swing` | `0` | `swing` | Delays every odd step by this fraction of a step. Clamped `0..0.5`. Rampable. |
+
+> **Why `variation` isn't rampable.** It's an input to *seeded generation*, not
+> a value read per note, so ramping it would mean the pattern quietly rewriting
+> itself mid-phrase. Setting it re-rolls a reproducible take and then holds
+> still. The same reasoning applies to `density` and `seed` — and it's the
+> general rule for choosing param vs. option: params are read while playing,
+> options are read while generating. (Every one of them still accepts
+> `at=beat`/`at=cycle`, as always — *not rampable* never means *not
+> schedulable*.)
+
+**How variation actually works.** Every operation transforms material that's
+already there; none invents anything new. That's what keeps a variation
+recognisable rather than merely different.
+
+For rhythms: a hit may be dropped, a rest may pick up a ghost note, a hit may
+be nudged to a neighbouring step (only into space you left empty), and a hit's
+sample slot may be re-picked. Ghost notes are weighted by category — an extra
+hat is what a drummer does without noticing, an extra kick moves the whole
+track's centre of gravity, so kicks get them far more rarely.
+
+For chords and melodies: the pattern's **own notes** are read as its
+vocabulary, and variation stays inside it — chords are inverted or a voice
+octave-displaced (both change the sound a lot and the harmony not at all), a
+degree may be swapped for a neighbouring one *drawn from the pattern itself*,
+and a gap may pick up a passing tone between the notes either side. It won't
+wander into notes your progression never used.
+
+Even at `variation=1`, roughly two thirds of a source rhythm survives. That's
+the design target: a "variation" that leaves nothing of the original is just a
+different pattern.
+
+Querying it (`/beat`) prints what it's actually playing — a grid for drums:
+
+```
+kicks  x.....x...x.....
+snares ...x......g.x...
+hats   x.x.xgx.x.x.x.x.
+```
+
+or a token line for notes:
+
+```
+0,3,7 . -4,0,3 . 3,7,10 . -2,2,5 .
+```
+
+```
+/add_track name=drums synth=percsampler
+/add_modulator type=patternvariator name=beat pack=hiphopdrums pattern=boom-bap
+/patch source=beat dest=drums.notes
+/beat                          # show the varied grid
+/beat variation=0.8            # skips, ghosts, hits nudged off the grid
+/beat seed=random              # another take at the same amount
+/beat pattern=halftime         # a different pattern from the same pack
+/beat density=0.6              # thin it without changing its character
+/beat swing=0.18 4b            # ride the swing up over 4 beats
+/beat pattern=dusty at=cycle   # swap on the next downbeat
+```
+
+Two example sessions ship with the reference app: `pattern-drums` (two
+variators over a split kit, one of them phasing) and `pattern-chords`
+(chords and a melody on two `karplus` tracks).
 
 ## Events
 

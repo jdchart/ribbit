@@ -50,10 +50,6 @@ export class RibbitRandomNotes extends RibbitModulator {
             min_gap: this._paramSources.create(min_gap, { min: 0.0625, max: 16 }),
         };
 
-        // Channels (tracks) currently patched into this modulator's .notes —
-        // maintained by RibbitEventPatch's constructor/disconnect(), read by
-        // RibbitClock on every tick (see clock.js). Empty until /patch'd.
-        this.eventDestinations = [];
 
         // Absolute (non-loop-relative) beat of the next slot to roll the dice
         // on — undefined until the first generateEvents() call, which seeds it

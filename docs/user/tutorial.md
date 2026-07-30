@@ -610,6 +610,125 @@ open the stereo picture up and close it again:
 
 Load `/code-editor/percs-demo` for a worked version of all of this.
 
+## Playing music you wrote yourself
+
+Every generator so far invents its material from a rule. Sometimes you know
+exactly what you want to hear — and for that there's `patternvariator`, which
+plays a **pattern file** you write by hand and varies it as it goes.
+
+Three packs of patterns ship. Point one at a drum kit:
+
+```
+/add_track name=drums synth=percsampler
+/add_modulator type=patternvariator name=beat pack=hiphopdrums pattern=boom-bap
+/patch source=beat dest=drums.notes
+/start
+```
+
+Ask it what it's playing:
+
+```
+/beat
+```
+
+```
+kicks  x.....x...x.....
+snares ....x.......x...
+hats   x.x.x.x.x.xx...g
+```
+
+**Your grid won't match that one**, and that's the point: an unseeded variator
+picks a random seed, so every fresh one is a different take. Compare it against
+the source file — `hiphopdrums/boom-bap.json` has kicks on steps 0, 6 and 10,
+snares on 4 and 12, and straight eighth hats. Most of that survives; the
+default `variation` is 0.3, so it's only nudging things gently. In the grid
+above a `g` (a quiet **ghost note**) has appeared in a hat rest, and one hat
+slid a step. Yours will have done something else, somewhere else.
+
+To get a specific take back, give it a seed — `pattern=boom-bap seed=42` is
+reproducible forever, which is also why a saved session reloads exactly what
+you left.
+
+Turn the variation up:
+
+```
+/beat variation=0.8
+/beat
+```
+
+Hits get dropped, ghosts appear in the gaps, and the occasional hit slides one
+step off the grid — but the backbone is still recognisably the same beat. That's
+deliberate: every operation transforms what's already there rather than
+inventing something new, so even at `variation=1` most of the source survives.
+
+Don't like this particular take? Roll another:
+
+```
+/beat seed=random
+```
+
+Each take is reproducible from its seed, so a saved session reloads the exact
+same one. `/beat density=0.6` thins it out; `/beat pattern=halftime` swaps to a
+different pattern in the same pack.
+
+### Chords and melodies
+
+The same modulator plays pitched material, and `karplus` — a plucked string,
+and the only polyphonic synth — is what to point it at:
+
+```
+/add_track name=keys synth=karplus
+/add_modulator type=patternvariator name=chords pack=darkchords pattern=seventh-fall
+/patch source=chords dest=keys.notes
+```
+
+Patterns are written in **scale degrees**, not fixed notes, and degrees resolve
+against the harmony context when each note plays. So the whole progression
+moves with:
+
+```
+/harmony root=57
+```
+
+Variation works differently here, and more musically than you might expect: it
+reads the pattern's *own notes* as its vocabulary and stays inside them —
+inverting a chord, dropping a voice an octave, swapping a degree for another
+one the progression already uses. It won't wander into notes you never wrote.
+
+```
+/chords variation=0.7
+/chords transpose=3      shift up a minor third, diatonically
+/keys damping=0.9 8b     let the strings go dull over 8 beats
+```
+
+### Writing your own
+
+A pattern is a small JSON file, and a drum pattern is just a character grid:
+
+```json
+{
+  "kind": "drums",
+  "step_beats": 0.25,
+  "lanes": {
+    "kicks":  "x... ..x. ..x. ....",
+    "snares": ".... x... .... x...",
+    "hats":   "x.x."
+  }
+}
+```
+
+`x` is a hit, `.` a rest, and **spaces are ignored** — they're there so you can
+see the bar. Note the hats lane is only four steps: a lane repeats at its own
+length, so you write only as much as the part actually needs (and a 6-step lane
+against a 16-step one gives you polymeter for free).
+
+Drop that in `static/patterns/<yourpack>/<yourpattern>.json`, refresh, and it's
+selectable. Full format reference, including chords and melodies:
+**[patterns.md](patterns.md)**.
+
+`/code-editor/pattern-drums` and `/code-editor/pattern-chords` are worked
+versions of both halves of this.
+
 ## The mixer
 
 At the top, the **Transport** bar has the engine on/off button, a pulsing

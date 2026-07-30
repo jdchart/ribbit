@@ -85,8 +85,10 @@ Precedents in this codebase, both from removing `noon`:
   `RibbitRandomNotes` still implements the modulator-side equivalent.
 - The `_resolveDest` fallback to `channel.source.params`, which makes a
   *synth's* own param reachable as a patch destination (`dest=track_1.cutoff`).
-  **Kept** — neither built-in synth declares a param today, but the fallback
-  is a genuine gap-fix, not noon scaffolding.
+  **Kept** — and no longer hypothetical: `percsampler`
+  (`dynamics`/`pan_spread`/`speed_spread`) and `karplus`
+  (`damping`/`decay`/`brightness`) both declare params, so this path is
+  exercised in tree rather than merely defended.
 
 A sibling type built alongside the one you're removing (the `cv` modulator,
 in noon's case) is a separate decision — judge it on its own merits, not by
@@ -130,7 +132,13 @@ for, and remove:
 - **Doc references** — `nllc/README.md` and `nllc/docs/{user,dev,llm}/`
   each enumerate the available routes and the contents of `static/sessions/`.
 - **Any samples or assets** the type fetched from `static/`, if nothing else
-  uses them.
+  uses them. Two types currently own a `static/` tree and a manifest route
+  each: `percsampler` (`static/samples/`,
+  `src/routes/samples/manifest.json/+server.js`) and `patternvariator`
+  (`static/patterns/`, `src/routes/patterns/manifest.json/+server.js`).
+  Removing either means removing its route too, not just the files — and note
+  a *pattern pack* is content rather than code, so it survives independently
+  of any one modulator.
 
 Note `.svelte-kit/` will still contain generated references to a deleted
 route; that's a build artifact and regenerates on the next `npm run dev`.

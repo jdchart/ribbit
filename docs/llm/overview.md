@@ -70,7 +70,7 @@ running (this is exactly what `SessionPage.svelte`'s `onMount` cleanup is for).
   GainNodes, `params` (`{name: RibbitParam}`) as its console-facing control
   surface, and `active` as a *routing bypass* (handled by the owning channel).
 - **`RibbitModulator`** (base of `RibbitLFO`, `RibbitCV`, `RibbitRandomNotes`,
-  `RibbitMarkovPercs`, `RibbitEuclidPercs`): a
+  `RibbitMarkovPercs`, `RibbitEuclidPercs`, `RibbitPatternVariator`): a
   control source, structurally a processor's sibling (`params`, no per-event
   trigger) but never joins a channel's chain — it exists only to be patched
   somewhere.
@@ -80,14 +80,25 @@ running (this is exactly what `SessionPage.svelte`'s `onMount` cleanup is for).
   class) has a bipolar (`-1..1`-
   ish) `output` patched via `RibbitPatch` into an `AudioParam`, with a patch's
   own `depth` deciding how hard it pushes; an **event-generating** modulator
-  (`RibbitRandomNotes`, `RibbitMarkovPercs`, `RibbitEuclidPercs`) instead implements
+  (`RibbitRandomNotes`, `RibbitMarkovPercs`, `RibbitEuclidPercs`,
+  `RibbitPatternVariator`) instead implements
   `generateEvents(fromBeat, toBeat)`
   (called by the clock every tick with an absolute, non-loop-relative beat
-  range) and owns `eventDestinations` (channels currently patched to it via
+  range) and uses `eventDestinations` (channels currently patched to it via
   the reserved `dest=<track>.notes` destination — `RibbitEventPatch`, not
   `RibbitPatch`), delivering generated `RibbitEvent`s straight to
   `destination.source.trigger(...)` — the same call a manually `add_event`'d
   note uses, running alongside it rather than replacing it.
+  Two things live on the **base** class for every modulator, event-generating
+  or not: `eventDestinations` (an empty array — `patch.js` and
+  `Ribbit._createEventPatch` index into it directly, so a generator that forgot
+  to initialize it failed at patch time with an unattributable "cannot read
+  properties of undefined") and `_stride()`, which asks the patched destination
+  how many sample slots one drum category occupies (`RibbitPercSampler`
+  publishes `slotsPerCategory`) and falls back to the subclass's own
+  `per_category`. `_stride` describes the *destination*, not the generation
+  strategy, which is why all three percussion generators share one copy and why
+  a pattern written for a 4-slot kit sounds identical on a 1- or 8-slot one.
 - **`RibbitPatch`**: one connection — `source.output → depthGain → destParam`,
   literally a native Web Audio "connect a node into an AudioParam," which
   *adds* to whatever the destination's own value/ramp already is rather than
@@ -149,9 +160,18 @@ running (this is exactly what `SessionPage.svelte`'s `onMount` cleanup is for).
   processors, and modulators uniformly as "units" — anything with
   `events`/`automation`/`trigger()`/`active`, plus two optional duck-typed
   hooks: `generateEvents(fromBeat, toBeat)` (event-generating modulators, see
-  above) and `onClockStart()` (called by `start()` — a (re)start rewinds
+  above), `onClockStart()` (called by `start()` — a (re)start rewinds
   absolute beats to 0, so a unit with its own absolute-beat state, e.g.
-  `RibbitRandomNotes`' candidate cursor, resets it there). Its own `_tick()` is wrapped in a
+  `RibbitRandomNotes`' candidate cursor, resets it there), and
+  `onCycle(cycleIndex)` (called when a new loop index is first scheduled — the
+  hook for "change something every N cycles", e.g. regenerating a pattern).
+  `onCycle` fires one lookahead window *before* that cycle's events are read,
+  which is what a regenerating unit needs; `cycleIndex` is monotonic but **not
+  necessarily contiguous**, since a stall skips cycles rather than replaying
+  them (regenerating for cycles nobody will hear is worse than landing on the
+  current one). **No shipped type consumes it yet** — all four generators index
+  `generateEvents` straight off the absolute beat, which sidesteps needing it,
+  and `patternvariator` deliberately regenerates only on reseed. Its own `_tick()` is wrapped in a
   try/catch so one bad event/param can only drop a single scheduling pass, never
   permanently kill the engine. Also exposes `nextBeatTime()`/`nextCycleTime()`,
   the anchors for deferred console ramps/instant sets (see below).
@@ -168,15 +188,28 @@ running (this is exactly what `SessionPage.svelte`'s `onMount` cleanup is for).
   which is a one-off `scheduleRamp()` call anchored to an absolute time
   (immediate by default, or the next beat/cycle with `at=beat`/`at=cycle`) and
   never touches a unit's `.automation` array — see `automation.js`.
-- **`at=beat` / `at=cycle` is universal.** It is a property of *when a command
-  takes effect*, not of whether the thing being changed is rampable, and
-  **every mutating command honors it** — a param ramp, a plain instant set, an
-  option (`/rhy seed=20 at=cycle`), `/harmony root=`, a track's `start`/`stop`,
-  `synth=`, routing (`out=`/`add_send=`/`remove_send=`), `add_processor=`/
-  `remove_processor=`, event editing (`add_event`/`remove_event=`/
-  `clear_events`), the `automate=` family, `remove_self`, `/patch`/`/unpatch`,
-  `/save`/`/remove_state`, object creation, and `/start`/`/stop`. Read-only
-  listing commands are the only ones with nothing to schedule.
+- **`at=beat` / `at=cycle` is universal, with exactly one exception.** It is a
+  property of *when a command takes effect*, not of whether the thing being
+  changed is rampable, and **every mutating command honors it** — a param ramp,
+  a plain instant set, an option (`/rhy seed=20 at=cycle`), `/harmony root=`, a
+  track's `start`/`stop`, `synth=`, routing (`out=`/`add_send=`/
+  `remove_send=`), `add_processor=`/`remove_processor=`, event editing
+  (`add_event`/`remove_event=`/`clear_events`), the `automate=` family,
+  `remove_self`, `/patch`/`/unpatch`, `/save`/`/remove_state`, and
+  `/start`/`/stop`. Read-only listing commands have nothing to schedule.
+  **The exception is object creation** — `/add_track`, `/add_bus`,
+  `/add_modulator` **refuse `at=` with an error** (`refusesAt` in
+  `commands.js`). Everywhere else `at=` answers "when should this change take
+  effect", but a creation's effect is *a name starting to exist*: a deferred
+  creation can't report the name it will get (which is the command's entire
+  output, and auto-generated names aren't known until construction), isn't
+  addressable by a later command on the same line
+  (`/add_track name=x at=cycle /x gain=0.5` silently half-works), and isn't
+  audible anyway, since a fresh track/bus/modulator makes no sound until
+  something is wired into it. Create now, defer the wiring — `/patch`,
+  `add_processor=` and `start`/`stop` all take `at=`, and that was the useful
+  gesture all along. Refusing loudly, rather than silently dropping it, is the
+  same principle that motivated making `at=` universal in the first place.
   Three mechanisms sit behind that one keyword, picked by what's being
   changed: an `AudioParam` ramp gets `scheduleRamp`, a plain param set gets
   `setValueAtTime` (`setInstant`), and everything else — options, structural
@@ -205,9 +238,9 @@ opening any source file, and update it whenever a type is added or removed.
 
 `src/ribbit.js`:
 ```js
-const SYNTH_TYPES = { oscsynth: RibbitOscSynth, sampler: RibbitSampler, percsampler: RibbitPercSampler };
+const SYNTH_TYPES = { oscsynth: RibbitOscSynth, sampler: RibbitSampler, percsampler: RibbitPercSampler, karplus: RibbitKarplus };
 const PROCESSOR_TYPES = { reverb: RibbitReverb, delay: RibbitDelay };
-const MODULATOR_TYPES = { lfo: RibbitLFO, randomnotes: RibbitRandomNotes, cv: RibbitCV, markovpercs: RibbitMarkovPercs, euclidpercs: RibbitEuclidPercs };
+const MODULATOR_TYPES = { lfo: RibbitLFO, randomnotes: RibbitRandomNotes, cv: RibbitCV, markovpercs: RibbitMarkovPercs, euclidpercs: RibbitEuclidPercs, patternvariator: RibbitPatternVariator };
 ```
 
 Non-base implementations live one folder down from `src/`, grouped by
@@ -220,7 +253,11 @@ and is registered in `ribbit.js` exactly as above — nothing else needs to chan
 There is no folder for buses; a bus is just a plain `RibbitChannel`, not a new
 class.
 
-One type carries a **host contract** beyond the registry: `RibbitPercSampler`
+**Two** types carry a **host contract** beyond the registry, and they have the
+same shape — a browser can't list a directory over HTTP, so anything that
+chooses from the host's library needs the host to publish what there is to
+choose from. `RibbitPatternVariator` is the second one; see the pattern-format
+section below. The first: `RibbitPercSampler`
 fills its kit at random from the host's sample library, and a browser can't
 list a directory over HTTP, so the host must serve a manifest — GET
 `/samples/manifest.json` (overridable per instance via the `manifest_url`
@@ -235,6 +272,58 @@ it just chose rather than the one it replaced. *Removing* a type is not that in 
 `docs/llm/removing-types.md`, since docs, code-comment examples, host-app demo
 routes, and saved session JSON (which stores a `.type` key that will then fail
 to load) all accumulate references over a type's life.
+
+## Patterns (`pattern.js`)
+
+A **pattern** is a hand-written musical fragment — a drum rhythm, a chord
+progression, a melody — living as JSON in the host's static folder and read by
+`RibbitPatternVariator`. It is deliberately *not* a saved session: a session is
+a whole graph captured by the engine, while a pattern is source material a
+human types into a text editor. That difference drives every choice in the
+format — it optimizes for **being written by hand**, not for round-tripping.
+
+One grid, two token languages, selected by `kind`. There is no third kind for
+melodies: a melody is a `notes` pattern with one degree per step.
+
+```json
+{ "name": "boom bap", "kind": "drums", "step_beats": 0.25,
+  "lanes": { "kicks":  "x... ..x. ..x. ....",
+             "snares": ".... x... .... x...",
+             "hats":   "x.x." } }
+
+{ "name": "minor drift", "kind": "notes", "step_beats": 1, "duration": 2,
+  "sequence": ["0,3,7", ".", "-4,0,3", ".", "3,7,10", ".", "-2,2,5", "."] }
+```
+
+- **`drums`** — one character lane per `PERC_CATEGORIES` entry. `x` hit, `X`
+  accent, `g` ghost, `0`-`9` a specific variant slot within the category,
+  `.`/`-`/`_`/`~` rest, and **spaces are ignored entirely** so a bar can be
+  grouped visibly. Slots resolve through `_stride()`, so this drives a
+  `percsampler` including a split kit.
+- **`notes`** — one token per step, a token being comma-separated scale
+  degrees (`"0,3,7"` a triad, `"0"` a single note, `"."` a rest). Degrees
+  resolve against the shared harmony context at *trigger* time, so `/harmony`
+  retunes a loaded pattern live.
+- **Each lane cycles at its own length.** `"hats": "x.x."` spans a 16-step
+  pattern by repeating, and a 6-step lane against a 16-step one gives
+  polymeter for free — you write only as much as a part actually needs.
+- **`steps` is inferred** from the longest lane (or the sequence) unless
+  declared, so there's no count to silently desync from the thing it describes.
+- Parsing is **tolerant on input, strict on error**: several rest characters
+  are accepted and lanes may differ in length, but an unparseable token throws
+  with the offending text quoted — a silently-dropped note in a hand-edited
+  file is the failure mode that wastes an afternoon.
+
+**Host contract:** `GET /patterns/manifest.json` → `{ <pack>: ["<pack>/<name>.json", ...] }`,
+each entry relative to the same `/patterns/` prefix the files are served under.
+Deliberately the same shape as `/samples/manifest.json` — one rule to learn,
+not two. The one difference is that pack names are *not* fixed (sample
+categories map onto percsampler's four hardcoded slot groups; a pack is just a
+folder), so adding a directory is the whole workflow. Reference implementation:
+`nllc/src/routes/patterns/manifest.json/+server.js`. Manifests and parsed
+patterns are cached per URL, both as promise and resolved form, for the same
+reason `percsampler` does it: a live re-roll must complete synchronously or the
+console echoes the pattern it just replaced.
 
 ## Sessions and states (`session.js`, full detail: `docs/dev/architecture.md`)
 
@@ -541,13 +630,35 @@ and do nothing.
   precisely what a first-order chain structurally cannot do). Still missing:
   a step-string parser (`kicks=x..x..x.`), which would slot into the same
   contract. No per-cycle/every-N-cycle regeneration hook exists either,
-  though the clock's uniform "unit" contract would be the natural place to
-  add one (an optional `onCycle(cycleIndex)` called at loop boundaries) if/
-  when that's built — `generateEvents(fromBeat, toBeat)`'s own absolute-beat
-  design already sidesteps needing this for all three existing generators.
+  Four generation shapes now exist, the fourth being **hand-authored material,
+  varied** (`patternvariator`) — the only one whose input is a file a person
+  wrote rather than a rule. A step-string parser is no longer a gap: the
+  `drums` pattern kind *is* one (`kicks: "x..x..x."`), it just lives in a file
+  rather than on the command line, since sixteen characters don't survive
+  `splitCommands`.
+  An `onCycle(cycleIndex)` clock hook now exists for per-N-cycle regeneration
+  (see `RibbitClock`), but **nothing consumes it yet** —
+  `generateEvents(fromBeat, toBeat)`'s absolute-beat design sidesteps needing
+  it for all four generators, and `patternvariator` regenerates only on reseed
+  by deliberate choice: a pattern that quietly rewrites itself while you're
+  working on something else is very hard to play with.
 - The harmony context is a live key/scale (`/harmony root= scale=`), not a
   full harmony *system* — no chords, progressions, or per-track scale
   overrides, just the one shared context every `degree=` resolves against.
+- **`patternvariator` never invents material outside its source.** Rhythms
+  lose hits, gain ghosts, or nudge one step; pitched material is varied against
+  the pattern's *own* pitch-class vocabulary (inversion, octave displacement,
+  neighbour tones drawn from the degrees the pattern already uses) rather than
+  the harmony context's full scale. Voices are folded back inside ±24 semitones
+  so inversion and octave displacement landing on the same note can't spread a
+  chord across three octaves. At `variation=1` roughly two thirds of a source
+  rhythm still survives — that's the intent, not a limit.
+- **`karplus` renders each note into an `AudioBuffer`** rather than building a
+  feedback node graph, because Web Audio forces any cycle containing a
+  `DelayNode` to at least one render quantum of delay (capping the fundamental
+  around 375Hz). Consequence: pitch quantizes to a whole number of samples, so
+  error stays within ~6 cents to C6 and widens to ~22 cents by G6. Nothing is
+  cached — a fresh noise burst per pluck is the point.
 - Synth-level rampable `params` are live as of `percsampler`
   (`dynamics`/`pan_spread`/`speed_spread`) — the first synth to declare
   any. That exercises two paths that previously existed untested:

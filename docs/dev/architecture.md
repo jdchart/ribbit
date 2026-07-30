@@ -388,8 +388,17 @@ separate, simpler class rather than shoehorned into `RibbitPatch`: there's no
 just bookkeeping (`sourceObject`/`destObject`/`sourceName`/`destName`, an
 `id`) plus one side effect its constructor performs: pushing `destObject`
 (a channel, not its synth directly — see below) onto
-`sourceObject.eventDestinations`, an array the source modulator itself owns.
-`disconnect()` is the inverse — splice it back out.
+`sourceObject.eventDestinations`, an array declared on `RibbitModulator`
+itself. `disconnect()` is the inverse — splice it back out.
+
+That array lives on the **base class**, not on each event-generating subclass,
+and the reason is a bug it caused: `patch.js` and `Ribbit._createEventPatch`
+both index into it directly, so a generator that omitted its own declaration
+failed at *patch* time with a bare "cannot read properties of undefined" —
+an error nowhere near the omission, which took out every `.notes` patch in a
+session file at load while leaving the rest of the graph built. It was never
+optional for an event generator, so it never belonged to the subclass; a
+continuous modulator just leaves it empty.
 
 The clock is what actually moves notes along this "cable." `RibbitClock`'s
 uniform per-unit contract (`events`/`automation`/`trigger()`/`active`) gains
@@ -433,6 +442,25 @@ Session save/load and `/recall` treat an event patch as just another patch
 with no `depth` to serialize/ramp — `session.js`'s `serializePatch`/
 `reconcilePatches` both check `patch.params.depth` before touching it, since
 an `RibbitEventPatch`'s `params` is `{}`.
+
+Four generators now exist, and the useful axis between them is **what decides
+whether a hit happens** — worth knowing before adding a fifth, since a new
+answer to that question is usually more valuable than a new sound.
+`RibbitRandomNotes` rolls fresh dice per slot (never repeats).
+`RibbitMarkovPercs` looks at the previous step (a fixed pattern, but no notion
+of bar position, so it structurally cannot hold a downbeat).
+`RibbitEuclidPercs` looks at the step's own index (exactly repeatable; it can).
+`RibbitPatternVariator` reads **a file a person wrote** and varies it — the
+only one whose material is authored rather than derived, and the reason the
+long-noted "step-string parser" gap is now closed: the `drums` pattern kind
+*is* one, living in a file rather than on the command line, because sixteen
+grid characters don't survive `splitCommands`.
+
+The three percussion generators share one slot contract through
+`RibbitModulator._stride()` (see `source-overview.md`): each stores
+`{ category, variant }` and resolves `category * stride + variant` at delivery
+against whatever it's patched into. That's what lets any of them drive a kit
+with 1 or 8 slots per category, and lets two of them share one kit.
 
 ### Harmony context
 
@@ -501,6 +529,23 @@ holding its own absolute-beat state — `RibbitRandomNotes`' candidate-grid
 cursor is the one current example — must reset it there, or a `/stop`
 `/start` would strand it at the pre-stop beat number, silently generating
 nothing until the clock caught back up.
+
+A fourth hook, `unit.onCycle?.(cycleIndex)`, fires from `_scheduleRange` the
+first time a given loop index is scheduled — the seam for "change something
+every N cycles". It deliberately fires **a lookahead window early**, in the
+same pass that schedules that cycle's first events, because a unit that
+regenerates must have rewritten its pattern *before* that pattern is read.
+`cycleIndex` is monotonic but not contiguous: a stall skips cycles rather than
+replaying them, since regenerating for cycles nobody will hear is worse than
+landing on the current one.
+
+**Nothing implements it yet**, and that's worth stating rather than leaving a
+reader to discover it. `generateEvents`' absolute-beat design means no current
+generator needs a boundary notification, and `RibbitPatternVariator`
+regenerates only on reseed by deliberate choice — a pattern that quietly
+rewrites itself while you're working on something else is hard to play with.
+It's an unused seam, added because the uniform unit contract is the natural
+place for it, not dead code.
 
 Both `bpm` and `loopLengthBeats` are runtime-mutable. `setBpm` is glitch-free —
 it rebases `startTime` so the current playback beat doesn't jump — and also
@@ -575,8 +620,8 @@ mid-performance is discrete — reseed a generator, swap a waveform, mute a
 track, drop in a patch — and all of it wants to land on a boundary rather
 than wherever the keystroke fell. `commands.js`'s `runAt(nllc, timing,
 pending, fn)` is the path for everything that isn't `AudioParam`-backed:
-options, transport, routing, processor inserts, event edits, patches,
-creation and removal. It runs `fn` now or hands it to `scheduleAt`.
+options, transport, routing, processor inserts, event edits, patches, and
+removal. It runs `fn` now or hands it to `scheduleAt`.
 
 Two invariants fall out of that, and both are load-bearing:
 
@@ -595,7 +640,25 @@ Two invariants fall out of that, and both are load-bearing:
    told the change was scheduled.
 
 The only commands that ignore `at=` are the read-only listings, which have
-nothing to schedule.
+nothing to schedule — and **object creation, which refuses it outright**
+(`refusesAt` in `commands.js`, wrapping `add_track`/`add_bus`/`add_modulator`).
+
+That exception is worth the paragraph, because it was briefly implemented the
+other way. Everywhere else `at=` answers "when should this change take effect";
+but a creation's effect is *a name starting to exist*, and a name that will
+exist later is unusable in every way that matters. The command can't report
+what it created — which is its whole output, and an auto-generated name isn't
+known until construction. A later command on the same line can't address it, so
+`/add_track name=x at=cycle /x gain=0.5` silently half-works. And it isn't
+audible anyway: a fresh track, bus or modulator makes no sound until something
+is wired into it, and every wiring command (`/patch`, `add_processor=`,
+`start`/`stop`) already takes `at=`.
+
+So the rule "every mutating command is schedulable" was traded for one
+documented exception, on the grounds that uniformity is only worth having when
+the uniform behaviour is useful. What it must *not* do is silently drop the
+keyword — that was the original bug, and refusing loudly is the third and only
+good option.
 
 ### A third path: structural reconciliation for `/recall`
 

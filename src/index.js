@@ -39,6 +39,8 @@ export { RibbitProcessor } from "./processor.js";
 export { RibbitModulator } from "./modulator.js";
 export { RibbitPatch, RibbitEventPatch } from "./patch.js";
 export { positionToGain, gainToPosition } from "./taper.js";
+export { mulberry32, randomSeed } from "./random.js";
+export { parsePattern, cellAt, fetchPattern, fetchPatternManifest } from "./pattern.js";
 export {
     RibbitAutomationEvent,
     scheduleAutomationEvent,
@@ -53,6 +55,7 @@ export {
 export { RibbitOscSynth } from "./synths/oscsynth.js";
 export { RibbitSampler } from "./synths/sampler.js";
 export { RibbitPercSampler, PERC_CATEGORIES } from "./synths/percsampler.js";
+export { RibbitKarplus } from "./synths/karplus.js";
 export { RibbitReverb } from "./processors/reverb.js";
 export { RibbitDelay } from "./processors/delay.js";
 export { RibbitLFO } from "./modulators/lfo.js";
@@ -60,3 +63,4 @@ export { RibbitRandomNotes } from "./modulators/randomnotes.js";
 export { RibbitCV } from "./modulators/cv.js";
 export { RibbitMarkovPercs } from "./modulators/markovpercs.js";
 export { RibbitEuclidPercs } from "./modulators/euclidpercs.js";
+export { RibbitPatternVariator } from "./modulators/patternvariator.js";

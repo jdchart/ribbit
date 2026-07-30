@@ -89,14 +89,42 @@ the host's job — `nllc` generates it on request from `static/samples/`. A host
 that serves no manifest gets an empty kit and a console warning, not an
 error.
 
+### Patterns
+
+The `patternvariator` modulator plays **hand-written** musical material — a
+drum rhythm, a chord progression, a melody — from JSON files the host serves
+under `/patterns/`, and generates seeded variations on it. This is the one part
+of the engine whose input is a file a person edits rather than a command:
+
+```json
+{ "kind": "drums", "step_beats": 0.25,
+  "lanes": { "kicks":  "x... ..x. ..x. ....",
+             "snares": ".... x... .... x...",
+             "hats":   "x.x." } }
+```
+
+Same host contract as samples, for the same reason — a browser can't list a
+directory, so the host publishes a manifest at `/patterns/manifest.json`:
+
+```json
+{ "hiphopdrums": ["hiphopdrums/boom-bap.json"], "darkchords": [...] }
+```
+
+The one difference is that pack names aren't fixed: a pack is just a folder, so
+adding `static/patterns/<pack>/<name>.json` and refreshing is the whole
+workflow. Full format reference: [docs/user/patterns.md](docs/user/patterns.md).
+
 ## Documentation
 
 The same three-audience structure the rest of the workspace uses:
 
 - **[docs/user](docs/user/)** — the command and object reference: what you can
-  create and control, and the full slash-command vocabulary.
+  create and control, and the full slash-command vocabulary. Also
+  [writing patterns](docs/user/patterns.md) — the hand-editable JSON format for
+  drum rhythms, chords and melodies.
 - **[docs/dev](docs/dev/)** — architecture, a source walkthrough, and tutorials
-  for extending the engine (new synths, processors, modulators, commands) or
+  for extending the engine (new synths, processors, modulators, commands, or
+  [the pattern format](docs/dev/creating-a-pattern.md)) or
   [removing a type](docs/dev/removing-a-type.md) again.
 - **[docs/llm](docs/llm/)** — concise, context-window-friendly summaries meant
   to be fed to an LLM instead of the full source.
@@ -113,8 +141,11 @@ Import surface (see [`src/index.js`](src/index.js)):
   `RibbitParam`, `RibbitParamSources`, `RibbitEvent`, `RibbitSynth`,
   `RibbitProcessor`, `RibbitModulator`, `RibbitPatch`, `RibbitEventPatch`,
   plus the `automation`/`taper` helpers
+- **Patterns & randomness** — `parsePattern`, `cellAt`, `fetchPattern`,
+  `fetchPatternManifest`, `mulberry32`, `randomSeed`
 - **Built-in types** — `RibbitOscSynth`, `RibbitSampler`, `RibbitPercSampler`
-  (plus `PERC_CATEGORIES`), `RibbitReverb`, `RibbitDelay`, `RibbitLFO`,
-  `RibbitRandomNotes`, `RibbitCV`, `RibbitMarkovPercs`, `RibbitEuclidPercs`.
+  (plus `PERC_CATEGORIES`), `RibbitKarplus`, `RibbitReverb`, `RibbitDelay`,
+  `RibbitLFO`, `RibbitRandomNotes`, `RibbitCV`, `RibbitMarkovPercs`,
+  `RibbitEuclidPercs`, `RibbitPatternVariator`.
   See [docs/llm/catalog.md](docs/llm/catalog.md) for each one's params and
   options on a single page.

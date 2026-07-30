@@ -2,6 +2,7 @@ import { RibbitModulator } from "../modulator.js";
 import { RibbitParamSources } from "../param.js";
 import { RibbitEvent } from "../event.js";
 import { PERC_CATEGORIES } from "../synths/percsampler.js";
+import { mulberry32, randomSeed } from "../random.js";
 
 // Chain states: a rest, or one of PERC_CATEGORIES. Index 0 is the rest, so
 // state n>0 is PERC_CATEGORIES[n - 1].
@@ -62,19 +63,6 @@ const STYLES = {
     ],
 };
 
-// A small seeded PRNG (mulberry32). Math.random() can't be seeded, and a
-// seedable one is the whole reason a pattern survives a session round trip:
-// `seed` plus `style`/`steps`/`density` fully determine the rhythm, so a
-// saved session rebuilds the same bar rather than a new random one.
-function mulberry32(seed) {
-    let a = seed >>> 0;
-    return () => {
-        a = (a + 0x6D2B79F5) >>> 0;
-        let t = Math.imul(a ^ (a >>> 15), 1 | a);
-        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-};
 
 // Picks an index from one transition row. Walks the cumulative distribution
 // and falls back to the last index, so a row that sums to slightly under 1
@@ -131,7 +119,7 @@ export class RibbitMarkovPercs extends RibbitModulator {
         // An unseeded instance still gets a concrete seed rather than staying
         // "random forever" — otherwise getOptions() would have nothing to
         // save and a reload couldn't reproduce the pattern.
-        this.seed = Number.isFinite(Number(seed)) ? Math.floor(Number(seed)) : Math.floor(Math.random() * 2 ** 31);
+        this.seed = Number.isFinite(Number(seed)) ? Math.floor(Number(seed)) : randomSeed();
 
         this._regenerate();
 
@@ -148,7 +136,7 @@ export class RibbitMarkovPercs extends RibbitModulator {
                 get: () => this.seed,
                 set: (value) => {
                     if (typeof value === "string" && value.trim().toLowerCase() === "random") {
-                        this.seed = Math.floor(Math.random() * 2 ** 31);
+                        this.seed = randomSeed();
                     } else {
                         const parsed = Number(value);
                         if (!Number.isFinite(parsed)) {
@@ -231,9 +219,6 @@ export class RibbitMarkovPercs extends RibbitModulator {
             swing: this._paramSources.create(swing, { min: 0, max: 0.5 }),
         };
 
-        // Channels patched into this modulator's .notes — maintained by
-        // RibbitEventPatch, read by RibbitClock. Empty until /patch'd.
-        this.eventDestinations = [];
     };
 
     // Walks the chain once to build the fixed pattern: one entry per step,
@@ -259,21 +244,6 @@ export class RibbitMarkovPercs extends RibbitModulator {
         }
 
         this.pattern = pattern;
-    };
-
-    // How many slots one category occupies on the thing being driven. Asks
-    // the destination first (RibbitPercSampler publishes slotsPerCategory)
-    // and only falls back to this modulator's own per_category option when
-    // there's nothing to ask — the same duck-typed-optional-hook idiom the
-    // clock uses for generateEvents/onClockStart. That's what lets a pattern
-    // written for a 4-per-category kit stay musically identical when the kit
-    // is rebuilt with 1 or 8.
-    _stride() {
-        for (const destination of this.eventDestinations) {
-            const published = destination.source?.slotsPerCategory;
-            if (Number.isFinite(published) && published >= 1) return published;
-        }
-        return this.perCategory;
     };
 
     // Called by RibbitClock once per tick with an absolute (non-loop-relative)

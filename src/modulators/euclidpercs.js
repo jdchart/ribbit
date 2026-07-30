@@ -2,6 +2,7 @@ import { RibbitModulator } from "../modulator.js";
 import { RibbitParamSources } from "../param.js";
 import { RibbitEvent } from "../event.js";
 import { PERC_CATEGORIES } from "../synths/percsampler.js";
+import { mulberry32, randomSeed } from "../random.js";
 
 // Bjorklund's algorithm: distribute `pulses` hits as evenly as possible over
 // `steps` slots. Repeatedly pairs off the "hit" groups with the "gap" groups
@@ -66,18 +67,6 @@ const PRESETS = {
     sparse: { steps: 16, kicks: 2, snares: 1, hats: 3, percs: 2, kicks_rotate: 0, snares_rotate: 4, hats_rotate: 2, percs_rotate: 9 },
 };
 
-// Same seeded PRNG as RibbitMarkovPercs (mulberry32) and for the same reason:
-// `seed` has to fully determine the generated pattern, or a saved session
-// would rebuild a different kit assignment than the one that was saved.
-function mulberry32(seed) {
-    let a = seed >>> 0;
-    return () => {
-        a = (a + 0x6D2B79F5) >>> 0;
-        let t = Math.imul(a ^ (a >>> 15), 1 | a);
-        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-};
 
 function wholeNumber(value, key, minimum) {
     const parsed = Math.floor(Number(value));
@@ -159,7 +148,7 @@ export class RibbitEuclidPercs extends RibbitModulator {
         this.perCategory = Math.max(1, Math.floor(per_category));
         // Same reasoning as RibbitMarkovPercs: an unseeded instance still
         // gets a concrete seed, so getOptions() has something to save.
-        this.seed = Number.isFinite(Number(seed)) ? Math.floor(Number(seed)) : Math.floor(Math.random() * 2 ** 31);
+        this.seed = Number.isFinite(Number(seed)) ? Math.floor(Number(seed)) : randomSeed();
 
         this._regenerate();
 
@@ -219,7 +208,7 @@ export class RibbitEuclidPercs extends RibbitModulator {
                 get: () => this.seed,
                 set: (value) => {
                     if (typeof value === "string" && value.trim().toLowerCase() === "random") {
-                        this.seed = Math.floor(Math.random() * 2 ** 31);
+                        this.seed = randomSeed();
                     } else {
                         const parsed = Number(value);
                         if (!Number.isFinite(parsed)) {
@@ -287,7 +276,6 @@ export class RibbitEuclidPercs extends RibbitModulator {
             dropout: this._paramSources.create(dropout, { min: 0, max: 0.9 }),
         };
 
-        this.eventDestinations = [];
     };
 
     // Builds one euclidean layer per category: the raw distribution, rotated,
@@ -315,19 +303,6 @@ export class RibbitEuclidPercs extends RibbitModulator {
                 return { variant: roll < this.variation ? Math.floor(pick * this.perCategory) : 0 };
             });
         }
-    };
-
-    // How many slots one category occupies on the thing being driven — asks
-    // the destination first (RibbitPercSampler publishes slotsPerCategory)
-    // and falls back to this modulator's own per_category option when there's
-    // nothing to ask. Same contract as RibbitMarkovPercs._stride, which is
-    // what lets both generators drive the same kit interchangeably.
-    _stride() {
-        for (const destination of this.eventDestinations) {
-            const published = destination.source?.slotsPerCategory;
-            if (Number.isFinite(published) && published >= 1) return published;
-        }
-        return this.perCategory;
     };
 
     // Called by RibbitClock once per tick with an absolute (non-loop-relative)

@@ -79,6 +79,72 @@ an `RibbitAutomationEvent` target, e.g. `reverb.wet` in a pattern-automation
 call) does so as a thin delegate onto `this.params.wet.audioParam`, not a
 second implementation.
 
+## `random.js`
+
+`mulberry32(seed)` — a 32-bit seeded PRNG, and `randomSeed()` — a fresh
+unreproducible seed, which is what `seed=random` resolves to before being
+stored as a concrete number.
+
+Seedability is why a generated pattern survives a session round trip: `seed`
+plus the generator's shape options fully determine the output, so a saved
+session rebuilds the same bar rather than a new random one. The corollary is
+that anything which should *not* survive a reload deliberately uses
+`Math.random()` instead — `RibbitEuclidPercs`' live `dropout` re-roll is the
+one example. **The choice of generator is the choice of whether the result is
+part of the document.**
+
+Extracted here on reaching a third caller (`markovpercs`, `euclidpercs`,
+`patternvariator`) — the same threshold that moved `_stride()` onto
+`RibbitModulator`.
+
+## `pattern.js`
+
+The hand-written pattern format, and the loader for a host-served pattern
+library. Consumed by `modulators/patternvariator.js`; see
+[creating-a-pattern.md](creating-a-pattern.md) for the full treatment and
+[../user/patterns.md](../user/patterns.md) for the authoring side.
+
+The distinction that drives every decision in this file: a **session** is
+written by the engine for the engine, while a **pattern** is written by a
+person and only ever read. So the format optimizes for being typed and
+re-typed, not for lossless round-tripping.
+
+`parsePattern(raw, { source })` returns `{ name, kind, stepBeats, steps,
+duration, velocity, lanes, sequence }`, and is exported separately from loading
+so a pattern can be built inline without a fetch. Two kinds share one grid:
+`drums` (a character lane per `PERC_CATEGORIES` entry) and `notes` (one token
+per step, comma-separated scale degrees). A melody is a `notes` pattern with
+one degree per step, which is why there's no third kind.
+
+Three properties worth knowing before editing:
+
+- **`cellAt(cells, step)` wraps at the lane's own length, not the pattern's.**
+  Three lines, and the whole of "each lane cycles independently" — a short lane
+  repeats, a mismatched one gives polymeter, and no generator ever has to
+  expand lanes to a common length. Double modulo, since `generateEvents` works
+  in absolute beats that aren't guaranteed non-negative.
+- **Inference over declaration.** `steps` derives from the longest lane, `kind`
+  from which key is present, `duration` from `stepBeats`. A declared `steps` is
+  a second copy of a fact the lanes already carry, and duplicated facts
+  eventually disagree — silently truncating the pattern.
+- **Tolerant input, strict errors.** Four rest spellings, spaces ignored
+  anywhere, any lane length; but an unreadable token throws quoting the
+  offending character. There is no lenient parse mode, deliberately: a
+  hand-edited file that half-loads is worse than one that doesn't load.
+
+A drum cell holds `{ variant, gain }`, **never a finished slot number** —
+`category * stride + variant` resolves at delivery via `_stride()`. And
+`variant: null` (the author wrote `x`) is deliberately distinct from
+`variant: 0`, so a variator can re-pick an unspecified slot without overriding a
+deliberate one.
+
+Loading mirrors `percsampler` exactly, including the two-level cache
+(`manifestCache` promises + `resolvedManifests` values + `patternCache`): the
+promise collapses concurrent fetches from several variators built together,
+and the separately-resolved copy makes a live re-pick *synchronous*, so the
+console echoes the pattern it just chose rather than the one it replaced.
+Host contract: `GET /patterns/manifest.json` → `{ <pack>: ["<pack>/<n>.json"] }`.
+
 ## `event.js`
 
 `RibbitEvent({ beat, pitch, degree, velocity = 1, duration = 0.25 })` — a plain
@@ -190,6 +256,24 @@ position to 0, so any unit holding its own absolute-beat state (currently
 just `RibbitRandomNotes`' candidate-grid cursor) must reset it there —
 otherwise a `/stop` `/start` leaves that state stranded at a beat number the
 clock won't reach again for a long time.
+
+A third optional hook, `unit.onCycle?.(cycleIndex)`, fires inside
+`_scheduleRange` the first time a given loop index is scheduled — the seam for
+"change something every N cycles" (a generator re-rolling, a section
+advancing). Two properties matter. It fires **a lookahead window early**, in
+the same pass that schedules that cycle's first events, which is exactly what a
+regenerating unit needs: it has to have rewritten its pattern *before* that
+pattern is read. And `cycleIndex` is monotonic but **not necessarily
+contiguous** — if a stall swallowed whole cycles the skipped ones aren't
+replayed, since regenerating N times for cycles nobody will hear is strictly
+worse than landing on the current one. `_notifiedCycle` tracks the high-water
+mark and resets to `-1` in `start()`, so a restart re-announces cycle 0.
+
+**Nothing currently implements it.** All four generators index `generateEvents`
+straight off the absolute step number, which sidesteps needing a boundary
+notification at all, and `RibbitPatternVariator` regenerates only on reseed by
+deliberate design. It's an unused seam rather than dead code — the natural
+consumer is a future every-N-cycles generator.
 
 ## `channel.js` — `RibbitChannel`
 
@@ -308,6 +392,48 @@ These are the engine's first rampable **synth** params, so this is also the
 first exercise of `channelCommand`'s synth-param routing and of
 `_resolveDest`'s `channel.source.params` fallback (`dest=hats.pan_spread`).
 
+## `synths/karplus.js` — `RibbitKarplus extends RibbitSynth`
+
+A polyphonic Karplus-Strong plucked string, and the **only polyphonic synth** —
+a chord is several overlapping one-shot `BufferSource`s, so there's no voice
+allocator to run out.
+
+The one decision that shapes the file: **each note is rendered into an
+`AudioBuffer` by a JS loop, not built as a node graph.** The obvious Web Audio
+implementation — `DelayNode` → lowpass → gain → back into the delay — doesn't
+work above a few hundred Hz, because the spec requires any cycle containing a
+`DelayNode` to impose at least one render quantum (128 samples) of delay. At
+48kHz that floors the delay line at 2.7ms and caps the fundamental around
+375Hz, roughly F#4 — the middle of the range you'd actually play. Rendering
+directly is exact at every pitch, needs no `AudioWorklet` module for the host
+to serve (the engine asks hosts for JSON manifests and nothing else), and costs
+well under a millisecond per note.
+
+Three consequences worth knowing:
+
+- **Pitch quantizes** to a whole number of samples (`Math.round(sampleRate /
+  freq)`). Measured error stays inside ~6 cents to C6 and widens to ~22 cents
+  by G6 (a 31-sample line). The fix is a fractional delay with interpolated
+  read-back; judged not worth the inner-loop cost for the top octave.
+- **Nothing is cached.** Rendering is cheap next to the 100ms scheduling
+  window, and a fresh noise burst per pluck is the point — a cache would make
+  every repeat of a note bit-identical, which is exactly the mechanical quality
+  the noise excitation exists to avoid.
+- **Decay is pitch-compensated.** `feedback = 0.001 ** (1 / roundTrips)`, where
+  `roundTrips = ringSeconds * sampleRate / lineLength`. Without that, a high
+  note — whose line is short and therefore loops far more often per second —
+  would die away much faster than a low one.
+
+`damping`/`decay`/`brightness` are params (via `RibbitParamSources`, since
+there's no `AudioParam` in the graph to hang them off) rather than options
+because sweeping them is musical; each is read fresh per trigger, so a ramp
+applies from the next note. `excitation` is an option (`noise` — broadband, the
+classic; `pulse` — a single impulse, every harmonic in phase, a much cleaner
+attack). Notes ring for their natural decay; `event.duration` is honoured only
+as a *mute* when it's shorter than the ring, since a plucked string doesn't
+stop when the written note ends. Note the `source.stop()` call must follow
+`source.start()` — stopping an unstarted source throws `InvalidStateError`.
+
 ## `processor.js` — `RibbitProcessor` (base)
 
 Mirrors `RibbitSynth`: `name`, `input`/`output` (both `GainNode`s — subclasses wire
@@ -356,6 +482,26 @@ map as `RibbitSynth`/`RibbitProcessor` — `RibbitLFO.waveform`,
 `RibbitRandomNotes.scale`) and an `automation` array + `addAutomation()`, so
 a modulator's own params can be loop-automated exactly like a processor's
 (`/lfo1 automate=freq ...`).
+
+Two things live here that only the *event-generating* subclasses use, and both
+are on the base deliberately:
+
+`eventDestinations` — an empty array, the channels a generator currently
+delivers notes to, pushed/spliced by `RibbitEventPatch`. It was previously
+declared per-subclass, which made it look optional when it isn't:
+`patch.js` and `Ribbit._createEventPatch` index into it directly, so a new
+generator that forgot it failed at *patch* time with a bare "cannot read
+properties of undefined" — an error pointing nowhere near the omission, and one
+that broke every `.notes` patch in a session file at load. A continuous
+modulator simply leaves it empty; one uniform contract beats a conditional one.
+
+`_stride()` — asks the patched destination how many sample slots one drum
+category occupies (`RibbitPercSampler` publishes `slotsPerCategory`), falling
+back to the subclass's own `perCategory` when there's nothing to ask. It lives
+here rather than in each generator because it describes the **destination**,
+not the generation strategy: all three percussion generators need exactly the
+same answer, and that's what lets a pattern written against a 4-slot kit sound
+identical on a 1- or 8-slot one, and lets two generators share one kit.
 
 ## `modulators/lfo.js` — `RibbitLFO extends RibbitModulator`
 
@@ -508,6 +654,59 @@ the candidate grid's cursor is an **absolute** beat number, and a clock
 would leave the cursor stranded at the pre-stop beat, generating nothing
 until the clock caught back up to it. Any future unit holding its own
 absolute-beat state needs the same hook.
+
+## `modulators/patternvariator.js` — `RibbitPatternVariator extends RibbitModulator`
+
+The fourth generator, and the only one whose material is **authored rather than
+derived**: it loads a hand-written pattern (see `pattern.js` above) and
+generates seeded variations on it. Drives a `percsampler` (`drums` patterns,
+through the same slot contract as `markovpercs`/`euclidpercs`) or any pitched
+synth (`notes` patterns, emitting `degree`).
+
+The organizing rule, and the thing to preserve when editing: **every operator
+transforms existing material; none invents.** Concretely, pitched variation
+draws from `pitchCollection(sequence)` — the pattern's *own* pitch classes —
+rather than the harmony context's full scale, which is what keeps a variation a
+recognisable version of the source instead of a wander. The weight tables
+(`RHYTHM`, `MELODY`, probabilities at `variation=1`) are deliberately well
+under 1: at full strength roughly two thirds of a source rhythm still survives,
+which is the design target, not a limit.
+
+Operator notes:
+
+- Rhythm: `skip`, `displace` (only into a step the author left empty —
+  displacing onto another hit would delete it, a bigger edit than this operator
+  should make), `revariant` (re-pick the sample slot; the cheapest possible
+  variation — same rhythm, different kit). Ghost notes fill rests, weighted per
+  category by `GHOST_CHANCE`: an extra hat is what a drummer does without
+  noticing, an extra kick moves the track's centre of gravity.
+- Melody: `invert` and `octave` are weighted highest because they change the
+  sound a lot and the harmony not at all. `neighbour` is the only operator that
+  alters harmony, hence the modest weight. `passing` fills a gap with a tone
+  between its neighbours.
+- `REGISTER_LIMIT` (±24 semitones) folds runaway voices back: `invert` and
+  `octave` are independent and can both land on the same voice, compounding to
+  nearly three octaves from a source note. Folding by 12 preserves pitch class,
+  so the harmony survives the register correction.
+
+Each lane is varied **in place at its own length**, not expanded to the
+pattern's — that preserves the format's polymeter promise, at the cost of a
+short lane varying identically on each repetition, which is the right trade
+since the repetition is why it was written short.
+
+`variation` and `density` are **options, not params**, despite being numeric:
+they're inputs to seeded generation rather than values read per note, so
+ramping them would mean the pattern rewriting itself mid-phrase. `velocity` and
+`swing` are params. This is the same split `markovpercs` makes, and the general
+rule for the choice.
+
+Two things that were bugs and are now invariants. `_select()` rolls `pack` and
+`patternName` back if the new selection doesn't validate — a set that throws
+must leave the object exactly as it found it, or the *next* command reports the
+stale bad value instead of its own problem. And every draw must come from the
+seeded `random()` in a **fixed order**, since reproducibility across a
+save/load depends on the draw sequence being deterministic; inserting a
+conditional draw mid-sequence changes every take after it.
 
 ## `patch.js` — `RibbitPatch` / `RibbitEventPatch`
 

@@ -21,7 +21,7 @@ Registered in `src/ribbit.js` (`SYNTH_TYPES` / `PROCESSOR_TYPES` /
 
 ---
 
-## Synths (3)
+## Synths (4)
 
 A synth makes sound and is owned by a track (`/add_track synth=<type>`). Its
 params and options are addressed through the track's name — the synth is not
@@ -55,6 +55,20 @@ and so the model for any synth wanting rampable controls.
   every drum generator resolves slots against; requires a host-served
   `/samples/manifest.json`
 
+### `karplus` — `src/synths/karplus.js`
+A polyphonic Karplus-Strong plucked string: a noise burst circulated through a
+feedback delay line one wavelength long. Each note renders its own
+`AudioBuffer` in JS rather than building a node graph — a Web Audio feedback
+loop containing a `DelayNode` is forced to at least one render quantum of
+delay, which would cap the fundamental at about 375Hz. Notes ring for their
+natural decay; a written `duration` shorter than that reads as the player
+damping the string.
+
+- **params** — `damping` [0..1], `decay` [0.05..8] (seconds to -60dB, pitch-compensated), `brightness` [0..1]
+- **options** — `excitation` (noise, pulse)
+- **note** — the only synth that plays chords, so it's the model for anything
+  polyphonic; pitch quantizes above C6 (see the source comment)
+
 ---
 
 ## Processors (2)
@@ -80,14 +94,15 @@ small inter-channel offset for width.
 
 ---
 
-## Modulators (5)
+## Modulators (6)
 
 A control source, never in a channel's chain — it exists to be patched
 somewhere. Two distinct shapes:
 
 - **continuous** (`lfo`, `cv`): a bipolar signal on `.output`, patched into an
   `AudioParam` via `/patch source=<mod> dest=<name.param> depth=`.
-- **event-generating** (`randomnotes`, `markovpercs`, `euclidpercs`):
+- **event-generating** (`randomnotes`, `markovpercs`, `euclidpercs`,
+  `patternvariator`):
   implements `generateEvents(fromBeat, toBeat)` and is patched into a track's
   reserved `.notes` destination (`/patch source=<mod> dest=<track>.notes`, no
   `depth`). Generated notes run *alongside* a synth's authored `events`, never
@@ -142,6 +157,27 @@ can be a kick **and** a hat. Drives a `percsampler`.
   `kicks_rotate`/`snares_rotate`/`hats_rotate`/`percs_rotate`
 - **also** — `describeState()` prints the grid, one row per category
 
+### `patternvariator` — `src/modulators/patternvariator.js`
+Plays a **hand-written** pattern from the host's pattern library and generates
+seeded variations on it — the only generator whose material is authored rather
+than derived. Drives a `percsampler` (`kind: "drums"` patterns) or any pitched
+synth (`kind: "notes"`, i.e. chords and melodies). Format and loader:
+`src/pattern.js`; host contract: `GET /patterns/manifest.json`.
+
+Every operator transforms existing material rather than inventing: a rhythm can
+lose a hit, gain a ghost or nudge one step; a melody or chord is varied against
+**the pattern's own pitch-class vocabulary** (inversion, octave displacement,
+neighbour tones), so a variation stays recognisably a version of the source.
+Generated once and looped until reseeded, like `markovpercs`.
+
+- **params** — `velocity` [0..1], `swing` [0..0.5]
+- **options** — `pack`, `pattern` (or `random` for either), `seed` (or
+  `random`), `variation` [0..1], `density` [0..1], `step_beats`, `transpose`
+  (scale degrees, pitched patterns only), `per_category`
+- **also** — `describeState()` prints the varied result (a grid for drums, a
+  token line for notes); `variation`/`density` are **options, not params**,
+  because they feed seeded generation rather than being read per note
+
 ---
 
 ## Which one to copy
@@ -150,13 +186,17 @@ can be a kick **and** a hat. Drives a `percsampler`.
 | --- | --- |
 | is a simple synth voice | `oscsynth` |
 | loads audio files | `sampler`, then `percsampler` |
-| is a synth needing rampable params | `percsampler` (the only one) |
+| is a synth needing rampable params | `percsampler`, `karplus` |
+| is polyphonic / plays chords | `karplus` (the only one) |
+| synthesizes into a buffer rather than a node graph | `karplus` |
 | is a straightforward effect | `reverb` |
 | has a param spanning several nodes | `delay` (`onSet`) |
 | is a continuous control source | `cv` (minimal), then `lfo` |
 | generates notes continuously | `randomnotes` |
 | generates a fixed, looping pattern | `markovpercs` |
 | generates from grid position | `euclidpercs` |
+| plays or varies hand-authored material | `patternvariator` |
+| reads a host-served library (manifest) | `percsampler`, `patternvariator` |
 | needs a param with no natural `AudioParam` | any of the last three — all use `RibbitParamSources` (`src/param.js`) |
 
 Step-by-step guides: `building-synths.md`, `building-processors.md`,

@@ -142,17 +142,49 @@ command.
 
 ## Optional: runtime params
 
-`RibbitSynth.params` starts as `{}` and neither existing synth subclass
-populates it — both synths' runtime surface is currently options (above).
-If your synth has a genuinely rampable, `AudioParam`-backed value (a filter
-cutoff, say), populate `this.params` with `RibbitParam`s the same way a
-processor does (see [creating-a-processor.md](creating-a-processor.md) and
-`param.js`). Nothing else needs changing: `channelCommand` already routes
-`channel.source.params` through `applyParams()`, so `/track_1 cutoff=800 2b`
-(ramping and `at=` deferral included) works, and `_resolveDest` falls back
-from a channel's own `params` to its synth's, so `/patch dest=track_1.cutoff`
-resolves too. Both paths are live but currently unexercised — neither
-built-in synth declares a param — so yours would be the first to use them.
+`RibbitSynth.params` starts as `{}`. `oscsynth` and `sampler` leave it that
+way — their runtime surface is options (above) — but `percsampler`
+(`dynamics`/`pan_spread`/`speed_spread`) and `karplus`
+(`damping`/`decay`/`brightness`) both declare params, so there are two worked
+examples to copy.
+
+If your synth has a genuinely rampable value (a filter cutoff, say), populate
+`this.params` with `RibbitParam`s the same way a processor does (see
+[creating-a-processor.md](creating-a-processor.md) and `param.js`). Nothing
+else needs changing: `channelCommand` already routes `channel.source.params`
+through `applyParams()`, so `/track_1 cutoff=800 2b` (ramping and `at=`
+deferral included) works, and `_resolveDest` falls back from a channel's own
+`params` to its synth's, so `/patch dest=track_1.cutoff` resolves too.
+
+A synth param needs a real `AudioParam` behind it. If your value has no node
+of its own — `karplus` is the extreme case, since it renders each note in JS
+and has no live graph at all — use `RibbitParamSources` (`param.js`) rather
+than hand-rolling a `ConstantSourceNode`, and call its `dispose()` from your
+own:
+
+```js
+this._paramSources = new RibbitParamSources(audioContext);
+this.params = { cutoff: this._paramSources.create(cutoff, { min: 20, max: 20000 }) };
+dispose() { this._paramSources.dispose(); }
+```
+
+## Optional: polyphony, and synthesizing into a buffer
+
+`karplus` is the only polyphonic synth, and polyphony turned out to need no
+machinery: `trigger()` builds a fresh, self-contained voice per call, so a
+chord is simply several calls at the same beat. There's no voice allocator and
+nothing to run out of.
+
+It's also the only synth that renders audio with a **JS loop into an
+`AudioBuffer`** instead of building a node graph. Worth knowing as a technique,
+because sometimes a node graph can't express the algorithm: there, Web Audio
+requires any feedback cycle containing a `DelayNode` to impose at least one
+render quantum (128 samples) of delay, which caps a node-graph Karplus-Strong
+around 375Hz — the middle of the playable range. Rendering the samples directly
+is exact at any pitch and, importantly, needs no `AudioWorklet` module for the
+host to serve, which would be a new category of host obligation (the engine
+otherwise only ever asks hosts for JSON manifests). The cost is well under a
+millisecond per note.
 
 ## Removing one later
 

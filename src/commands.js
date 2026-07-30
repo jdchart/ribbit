@@ -1011,16 +1011,18 @@ function paramObjectKeywordsFor(object) {
 // no params of its own (tracks, patches, save_session, ...) just isn't
 // listed; resolveKeywordsFor falls back to [] for any recognized top-level
 // name. Every command that mutates something carries at=, since all of them
-// can now be deferred to a beat/cycle boundary (see runAt) — the read-only
-// listing commands are the ones with nothing to schedule.
+// can be deferred to a beat/cycle boundary (see runAt) — the read-only
+// listing commands are the ones with nothing to schedule, and the three
+// creation commands are the one deliberate exception (see refusesAt), so
+// none of them offers at= for completion either.
 const TOP_LEVEL_KEYWORDS = {
     start: ["at="],
     stop: ["at="],
-    add_track: ["name=", "synth=", "out=", "at="],
-    add_bus: ["name=", "out=", "at="],
+    add_track: ["name=", "synth=", "out="],
+    add_bus: ["name=", "out="],
     clock: ["bpm=", "num_beats=", "at="],
     harmony: ["root=", "scale=", "at="],
-    add_modulator: ["type=", "name=", "at="],
+    add_modulator: ["type=", "name="],
     patch: ["source=", "dest=", "depth=", "id=", "at="],
     unpatch: ["id=", "at="],
     save: ["name=", "at="],
@@ -1217,6 +1219,29 @@ export function createCommandRouter(ribbit) {
         return warning ? `${warning}; ${result}` : result;
     };
 
+    // The counterpart for a command that deliberately *refuses* at=, rather
+    // than honoring or (worst option) silently dropping it. Only object
+    // creation qualifies: at= elsewhere answers "when should this change take
+    // effect", but a creation's effect is that a name starts existing, and a
+    // name that will exist later is unusable in every way that matters. It
+    // can't be reported ("created track_3" is the whole point of the command,
+    // and the auto-generated name isn't known until the object is built), it
+    // isn't addressable by a later command on the same line
+    // (`/add_track name=x at=cycle /x gain=0.5` silently half-works), and
+    // deferring it buys nothing musical, since a track/bus/modulator makes no
+    // sound until something is wired into it. So create now and defer the
+    // wiring — /patch, add_processor, start/stop all take at= — which is the
+    // gesture that was actually wanted.
+    function refusesAt(commandName, fn) {
+        return (params) => {
+            const { at, ...rest } = params ?? {};
+            if (at !== undefined) {
+                return `${commandName} can't be deferred — a deferred creation has no name to report and isn't addressable until it fires. Create it now, then use at= on the command that wires it up.`;
+            }
+            return fn(rest);
+        };
+    };
+
     const commands = {
         // at= on /stop is the useful direction — "let the loop finish" —
         // while /start at= is accepted for uniformity but degenerate: a
@@ -1232,15 +1257,10 @@ export function createCommandRouter(ribbit) {
             ribbit.stop();
             return "engine stopped";
         }),
-        // Creating a track/bus/modulator makes no sound on its own, so at=
-        // here is much less useful than on the commands that wire them up
-        // (patch, add_processor, start/stop). It's honored anyway so that
-        // "at= works on anything that mutates" holds without exceptions —
-        // one fewer rule for a caller (or an NL layer) to special-case. The
-        // trade-off worth knowing: a deferred creation can't report the name
-        // it will get, and isn't addressable until it fires, so chaining
-        // `/add_track name=x at=cycle /x gain=0.5` on one line won't work.
-        add_track: (params) => scheduled(params, "track will be created", (options) => {
+        // Creation is the one documented exception to "every mutating command
+        // honors at=" — see refusesAt above for why deferring it is not worth
+        // what it costs.
+        add_track: refusesAt("add_track", (options) => {
             const track = ribbit.createTrack(options);
             return `created ${track.name}`;
         }),
@@ -1253,7 +1273,7 @@ export function createCommandRouter(ribbit) {
         // destination other tracks/buses can send into, e.g. a shared reverb
         // send or a drum sub-mix. Defaults to feeding master, same as a fresh
         // track, unless out=<name> names a different destination.
-        add_bus: (params) => scheduled(params, "bus will be created", (options) => {
+        add_bus: refusesAt("add_bus", (options) => {
             const bus = ribbit.createBus(options);
             return `created ${bus.name}`;
         }),
@@ -1357,7 +1377,7 @@ export function createCommandRouter(ribbit) {
             }
             return results.join("; ");
         },
-        add_modulator: (params) => scheduled(params, "modulator will be created", (rest) => {
+        add_modulator: refusesAt("add_modulator", (rest) => {
             const { type, ...options } = rest;
             const modulator = ribbit.createModulator(type ?? "lfo", options);
             return `created ${modulator.name}`;

@@ -167,11 +167,15 @@ document that it's worth calling out rather than shoehorning into the
   fixed, loop-relative `events` array — the shape a synth's own pattern
   uses — assumes a *repeating* pattern, which generated notes usually aren't).
   Return whatever `RibbitEvent`s should fire in that range.
-- Initialize `this.eventDestinations = []` — the clock delivers generated
-  notes to every channel in this array via `destination.source.trigger(...)`,
-  the exact same call a manually-authored event uses. This array is
-  maintained for you by `RibbitEventPatch` (`patch.js`), not something you
-  populate yourself.
+- `this.eventDestinations` is already there — declared on `RibbitModulator`,
+  so you **don't** initialize it yourself. The clock delivers generated notes
+  to every channel in this array via `destination.source.trigger(...)`, the
+  exact same call a manually-authored event uses, and the array is maintained
+  for you by `RibbitEventPatch` (`patch.js`). It used to be each subclass's
+  job, which made it look optional when it isn't: `patch.js` and
+  `Ribbit._createEventPatch` index into it directly, so a generator that forgot
+  it failed at *patch* time with a bare "cannot read properties of undefined" —
+  an error pointing nowhere near the omission.
 - If the modulator keeps its own **absolute-beat** state (like
   `RibbitRandomNotes`' `_nextCandidateBeat` cursor), implement
   `onClockStart()` (another duck-typed optional hook, called by
@@ -203,7 +207,43 @@ document that it's worth calling out rather than shoehorning into the
   called by `Ribbit.removeModulator` the same duck-typed-optional way as
   `generateEvents` itself — the base class's generic `output.disconnect()`
   alone won't reach them.
+- If it generates **drums**, don't emit raw slot numbers. Store
+  `{ category, variant }` and resolve `category * stride + variant` at
+  delivery, where `stride` comes from the inherited
+  `RibbitModulator._stride()` — it asks the patched destination
+  (`RibbitPercSampler` publishes `slotsPerCategory`) and falls back to your own
+  `perCategory`. That's what lets one pattern drive a kit with 1 or 8 slots per
+  category, and lets two generators share one kit.
+- If it needs seeded randomness (and any generator that should survive a
+  session round trip does), import `mulberry32`/`randomSeed` from `random.js`
+  rather than writing your own. Use `Math.random()` only for things that
+  deliberately *shouldn't* be reproducible — the choice of generator is the
+  choice of whether the result is part of the document.
 
+### Which kind of generator to build
+
+There are four, and they differ in **what decides whether a hit happens** —
+usually a more useful axis for a fifth than a new sound:
+
+| Generator | Decides from |
+|---|---|
+| `randomnotes` | a fresh dice roll per slot — never repeats |
+| `markovpercs` | the previous step — fixed pattern, no notion of bar position |
+| `euclidpercs` | the step's own index — exactly repeatable, can hold a downbeat |
+| `patternvariator` | **a file a person wrote**, plus seeded variation |
+
+The last one is the odd one out and worth understanding before adding another:
+its material is *authored* rather than derived, which is a genuinely different
+proposition from the other three. See
+[creating-a-pattern.md](creating-a-pattern.md) for the format it reads and how
+to extend it.
+
+One design note that applies to all of them: a value consulted only when the
+pattern is **regenerated** should be an *option*, even when it's numeric,
+because a ramp on it would look like a control that does nothing. Reserve
+params for values read fresh inside `generateEvents`. Both `markovpercs` and
+`patternvariator` split exactly this way — `seed`/`variation`/`density` are
+options, `velocity`/`swing` are params.
 
 ## Removing one later
 
