@@ -64,7 +64,7 @@ params:
 commands:
   gain=<val> / pan=<val>          set instantly; add a trailing duration to ramp, e.g. gain=0 3 (3s) or gain=0 4b (4 beats)
   at=beat|cycle                    defer ANY command on this line — a set, a ramp, or a discrete change like start/stop/synth=/an option — to the next beat/loop boundary instead of firing now
-  synth=<type>                     swap this track's synth (oscsynth, sampler, percsampler, karplus)
+  synth=<type>                     swap this track's synth (oscsynth, sampler, percsampler, karplus, granular, tapepad)
   add_event beat= pitch=|degree= velocity= duration=   append a note event (all optional except beat)
   ...
 ```
@@ -130,7 +130,7 @@ bus has the same shape, minus the trailing `synth=...` (it has none).
 | `start` | Resumes the track's own synth (its events/automation resume being scheduled). Not valid on master or a bus. |
 | `stop` | Pauses the track's own synth without touching routing or other tracks. Not valid on master or a bus. |
 | `synth=<type>` | Swaps the track's synth to a new instance of `<type>` (see [objects.md](objects.md)), discarding the old one's state (including its events — re-`add_event` afterward). Not valid on master or a bus (neither has a synth). Only the type is passed through this command — extra constructor options currently require creating the track fresh via `/add_track`. |
-| `add_processor=<type>` | Creates a new processor of `<type>` and appends it to this channel's insert chain. Returns its assigned name and id, e.g. `added reverb (p1)`. |
+| `add_processor=<type>` | Creates a new processor of `<type>` and appends it to this channel's insert chain. Returns its assigned name and id, e.g. `added reverb (p1)`. Types: `reverb`, `delay`, `compressor`, `saturator`, `tilt`, `limiter`, `goodenizer` (see [objects.md](objects.md)). The processor is named after its type — a second one of the same type becomes e.g. `compressor_2` — and `add_processor=` takes no name of its own. |
 | `remove_processor=<id>` | Removes the processor with that id from this channel's chain (and destroys it, along with any patch touching it). |
 | `out=<name>` | Replaces **every** current send with a single one to `<name>` (a track, bus, or `master`), at gain 1 — see [Buses and sends](#buses-and-sends). Not available on master: its one send to the actual speakers has no addressable name, so nothing typed at the console could ever wire it back (`remove_send=` refuses that same send for the same reason — `add_send=` on master stays allowed). |
 | `add_send=<name> [send_gain=<0-1>]` | Adds one more send to `<name>` without disturbing existing ones (`send_gain` defaults to `1`). Returns the new send's id, e.g. `added send s2 -> bus1 (gain 0.40)`. |
@@ -260,7 +260,26 @@ different amounts:
 A destination is always `name.param` — `name` is any track, any bus, `master`,
 any processor, or any modulator; `param` is one of that object's own params
 (`gain`/`pan` for a channel, whatever `params` keys a processor/modulator
-exposes, e.g. `wet`, `freq`). A source can be a modulator, but also any
+exposes, e.g. `wet`, `freq`).
+
+> **A patch reaches every param, but not at the same moment.** For a param the
+> audio graph itself consumes — channel `gain`/`pan`, every processor param,
+> `lfo`'s `freq`, `cv`'s `value`, a patch's own `depth` — the modulation is
+> continuous and sample-accurate. For a param read when a **note is
+> scheduled** — every **synth** param (`granular`'s `position`,
+> `percsampler`'s `pan_spread`, `karplus`'s `brightness`) and `velocity`/
+> `swing`/`probability`/`dropout` on an event-generating modulator — the value
+> is sampled once per note, at the moment the note is scheduled. So an LFO
+> into `position` moves each new grain cloud rather than sweeping one that's
+> already playing, and an LFO faster than the notes it modulates will alias.
+>
+> A synth can have some of each. `tapepad`'s `wow`, `wow_rate`, `flutter`,
+> `hiss` and `sat` sit on always-running shared nodes, so they're in the first
+> group — patched or ramped, they move *during* a held chord — while its
+> `cutoff`, `detune`, `sub` and the rest are in the second. Nothing in the
+> command surface tells them apart; the difference is only when you hear it.
+
+A source can be a modulator, but also any
 object with an output signal — a track, bus, or master's post-fader level, or
 a processor's post-effect signal — letting one track's level modulate another
 parameter (a basic sidechain).
@@ -477,10 +496,16 @@ curve to draw between two values — a half-applied waveform is meaningless — 
 that the change can't be timed.
 
 Which of the two a given value is is a design decision about whether *sweeping*
-it is musical. `percsampler`'s `pan_spread` is a param because opening it up
-over a few bars is a gesture you'd want; `markovpercs`' `style` is an option
-because it's only consulted when the pattern regenerates, so a ramp would look
-like a control that does nothing.
+it is musical. `granular`'s `position` is a param because walking the playhead
+across sixteen beats is the whole instrument; `markovpercs`' `style` is an
+option because it's only consulted when the pattern regenerates, so a ramp
+would look like a control that does nothing.
+
+One caveat on the list above: a **synth's** params, and an event-generating
+modulator's, are read in JavaScript once per note rather than continuously by
+the audio graph. Everything works on them — ramps, `automate=`, `/patch` — but
+a patch or a ramp moves them note by note rather than smoothly. See the note
+under [Modulators and patches](#modulators-and-patches).
 
 Both round-trip through `/save`/`/recall` and session files. See
 [objects.md](objects.md) for every type's params and options.

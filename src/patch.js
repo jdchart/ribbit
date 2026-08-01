@@ -2,8 +2,10 @@ import { RibbitParam } from "./param.js";
 
 // A single "patch cable": connects a source's raw output (a modulator, or
 // any other object exposing `.output` — a track/master's post-fader signal,
-// a processor's post-effect signal) into a destination AudioParam, through
-// its own depth (attenuator) gain node. Depth lives on the patch rather than
+// a processor's post-effect signal) into a destination param, through its own
+// depth (attenuator) gain node. `destParam` is the RibbitParam rather than
+// its bare AudioParam, so the cable can both drive it (audio) and announce
+// itself to it (see attachPatch, and RibbitParam.getModulated). Depth lives on the patch rather than
 // the source or destination, so the same modulator can drive several
 // destinations at different amounts, and removing one patch never touches
 // either endpoint directly — it just tears down the one cable.
@@ -24,7 +26,13 @@ export class RibbitPatch {
         this.depthGain.gain.value = depth;
 
         sourceObject.output.connect(this.depthGain);
-        this.depthGain.connect(destParam);
+        this.depthGain.connect(destParam.audioParam);
+        // Tells the destination it is now modulated, so a param that gets
+        // *read* rather than heard (a synth's grain position, a generator's
+        // probability) can see this cable at all — see
+        // RibbitParam.getModulated. Purely a reader; the audio connection
+        // above is what actually does the modulating.
+        destParam.attachPatch();
 
         // Console/UI-facing control surface (see commands.js's applyParams),
         // same shape every other patchable object's params use.
@@ -41,7 +49,8 @@ export class RibbitPatch {
 
     disconnect() {
         this.sourceObject.output.disconnect(this.depthGain);
-        this.depthGain.disconnect(this.destParam);
+        this.depthGain.disconnect(this.destParam.audioParam);
+        this.destParam.detachPatch();
     };
 };
 

@@ -41,6 +41,7 @@ export { RibbitPatch, RibbitEventPatch } from "./patch.js";
 export { positionToGain, gainToPosition } from "./taper.js";
 export { mulberry32, randomSeed } from "./random.js";
 export { parsePattern, cellAt, fetchPattern, fetchPatternManifest } from "./pattern.js";
+export { fetchSampleManifest, resolvedSampleManifest, sampleName, sampleUrl, sampleFolders } from "./samples.js";
 export {
     RibbitAutomationEvent,
     scheduleAutomationEvent,
@@ -56,8 +57,15 @@ export { RibbitOscSynth } from "./synths/oscsynth.js";
 export { RibbitSampler } from "./synths/sampler.js";
 export { RibbitPercSampler, PERC_CATEGORIES } from "./synths/percsampler.js";
 export { RibbitKarplus } from "./synths/karplus.js";
+export { RibbitGranular } from "./synths/granular.js";
+export { RibbitTapePad } from "./synths/tapepad.js";
 export { RibbitReverb } from "./processors/reverb.js";
 export { RibbitDelay } from "./processors/delay.js";
+export { RibbitCompressor } from "./processors/compressor.js";
+export { RibbitSaturator, SATURATOR_CHARACTERS } from "./processors/saturator.js";
+export { RibbitTilt } from "./processors/tilt.js";
+export { RibbitLimiter } from "./processors/limiter.js";
+export { RibbitGoodenizer } from "./processors/goodenizer.js";
 export { RibbitLFO } from "./modulators/lfo.js";
 export { RibbitRandomNotes } from "./modulators/randomnotes.js";
 export { RibbitCV } from "./modulators/cv.js";

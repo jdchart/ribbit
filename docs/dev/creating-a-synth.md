@@ -144,17 +144,28 @@ command.
 
 `RibbitSynth.params` starts as `{}`. `oscsynth` and `sampler` leave it that
 way — their runtime surface is options (above) — but `percsampler`
-(`dynamics`/`pan_spread`/`speed_spread`) and `karplus`
-(`damping`/`decay`/`brightness`) both declare params, so there are two worked
-examples to copy.
+(`dynamics`/`pan_spread`/`speed_spread`), `karplus`
+(`damping`/`decay`/`brightness`), `granular` (nine) and `tapepad` (eleven) all
+declare params, so there are four worked examples to copy.
+
+> **Read your params with `getModulated()`, not `get()`.** A synth param is
+> read in JavaScript when a note is scheduled, and a patch sums into the
+> `AudioParam`'s *computed* value, which a `.value` read never sees.
+> `getModulated()` reads the summed signal instead (see `param.js` in
+> [source-overview.md](source-overview.md#paramjs)); `get()` is for display
+> and serialization only. Use it for every param you read in `trigger()` and
+> `/patch dest=track_1.cutoff` works — once per note, so it moves each new
+> note rather than sweeping a sounding one.
 
 If your synth has a genuinely rampable value (a filter cutoff, say), populate
 `this.params` with `RibbitParam`s the same way a processor does (see
 [creating-a-processor.md](creating-a-processor.md) and `param.js`). Nothing
 else needs changing: `channelCommand` already routes `channel.source.params`
 through `applyParams()`, so `/track_1 cutoff=800 2b` (ramping and `at=`
-deferral included) works, and `_resolveDest` falls back from a channel's own
-`params` to its synth's, so `/patch dest=track_1.cutoff` resolves too.
+deferral included) works; `_resolveDest` falls back from a channel's own
+`params` to its synth's, so `/patch dest=track_1.cutoff` resolves; and
+`addressableParams()` does the same for `automate=`, so
+`/track_1 automate=cutoff to=2000 duration=4` attaches loop automation.
 
 A synth param needs a real `AudioParam` behind it. If your value has no node
 of its own — `karplus` is the extreme case, since it renders each note in JS
@@ -168,12 +179,47 @@ this.params = { cutoff: this._paramSources.create(cutoff, { min: 20, max: 20000 
 dispose() { this._paramSources.dispose(); }
 ```
 
+### Params that *aren't* read per note
+
+The rule above — read with `getModulated()`, moves note by note — applies to a
+param your `trigger()` reads. It doesn't have to be all of them. If your synth
+keeps **persistent shared nodes** alongside the one-shots it builds per note,
+any `AudioParam` on those is a param you can publish directly:
+
+```js
+this.params = { wow: new RibbitParam(this._wowGain.gain, { min: 0, max: 200 }) };
+```
+
+Such a param is *continuous* — a ramp or a patch moves it while notes are
+already sounding — and needs no `RibbitParamSources` entry, no
+`getModulated()` call, and no tap. `tapepad` is the worked example, and mixes
+both kinds in one `this.params`: five real `AudioParam`s on its shared tape
+transport, six JS-read ones for the per-note voice. The console can't tell
+them apart and doesn't need to; the difference is only *when* the change is
+audible, which is worth stating in your docs entry per param.
+
+Two things follow from having persistent nodes at all. They keep running when
+the track is stopped (`active` gates event scheduling, not audio — `tapepad`'s
+hiss is audible with the transport paused, deliberately), and they must be
+torn down in `dispose()`, since `removeTrack`/`setTrackSynth` only do a
+generic `output.disconnect()`.
+
 ## Optional: polyphony, and synthesizing into a buffer
 
-`karplus` is the only polyphonic synth, and polyphony turned out to need no
-machinery: `trigger()` builds a fresh, self-contained voice per call, so a
-chord is simply several calls at the same beat. There's no voice allocator and
-nothing to run out of.
+`karplus`, `granular` and `tapepad` are the polyphonic synths, and polyphony
+turned out to need no machinery: `trigger()` builds a fresh, self-contained
+voice per call, so a chord is simply several calls at the same beat. There's no
+voice allocator and nothing to run out of.
+
+`granular` pushes that further and is the example to read if your synth
+schedules **many** nodes per note: it places a whole cloud of grains (three
+nodes each) on the audio clock inside one `trigger()`, with no timers. Two
+rules it follows that generalize — put anything shared across a note's nodes
+on *one* node rather than per-node (its grain windows are unit-amplitude
+`Float32Array`s shared engine-wide, because level lives on the voice gain),
+and when a note would exceed your node budget, **thin it rather than truncate
+it**: a texture that gets sparser is a texture, a note that stops halfway
+through is a bug you can hear.
 
 It's also the only synth that renders audio with a **JS loop into an
 `AudioBuffer`** instead of building a node graph. Worth knowing as a technique,
@@ -185,6 +231,28 @@ is exact at any pitch and, importantly, needs no `AudioWorklet` module for the
 host to serve, which would be a new category of host obligation (the engine
 otherwise only ever asks hosts for JSON manifests). The cost is well under a
 millisecond per note.
+
+## Optional: loading files from the host
+
+If your synth plays audio the host serves, don't write your own fetch: use
+**`src/samples.js`** (`fetchSampleManifest`, `resolvedSampleManifest`,
+`sampleName`, `sampleUrl`). It exists because `percsampler` and `granular`
+both read the same library, and it carries two non-obvious things — a
+two-level cache (promise *and* resolved object, the latter so a live re-roll
+completes synchronously and the console echoes what it just chose rather than
+what it replaced) and a URL builder that doesn't over-escape path segments.
+
+The host contract is: a browser can't list a directory over HTTP, so the host
+publishes `GET /samples/manifest.json` → `{ <folder>: ["<folder>/a.wav", ...] }`.
+Keep the failure mode the others have — a missing manifest means a silent
+instrument and one `console.warn`, never a throw out of a constructor, and a
+trigger before loading finishes silently no-ops rather than queuing.
+
+Two conventions worth copying from `granular` if your synth picks a file at
+random: report the **resolved** path from your option's `get()` (never the
+word `random`, or a saved session wouldn't reproduce), and **gain-match the
+file on load** — an unmastered library spans tens of dB, and without matching
+every re-roll invalidates the mix.
 
 ## Removing one later
 

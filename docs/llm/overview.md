@@ -60,15 +60,38 @@ running (this is exactly what `SessionPage.svelte`'s `onMount` cleanup is for).
   created via `/add_bus`, existing purely to be a send destination other
   channels route into.
 - **`RibbitSynth`** (base of `RibbitOscSynth`, `RibbitSampler`,
-  `RibbitPercSampler`): produces sound. Has
+  `RibbitPercSampler`, `RibbitKarplus`, `RibbitGranular`): produces sound. Has
   `events` (`RibbitEvent{beat,pitch,degree,velocity,duration}` — starts **empty**,
   populated via `add_event`), a `trigger(time, event, secondsPerBeat)` method the
   clock calls per-event, an `output` GainNode, `harmony` (the shared context, see
   below), and an `active` flag (transport pause, distinct from routing bypass).
-- **`RibbitProcessor`** (base of `RibbitReverb`, `RibbitDelay`): effects, continuously
+- **`RibbitProcessor`** (base of `RibbitReverb`, `RibbitDelay`,
+  `RibbitCompressor`, `RibbitSaturator`, `RibbitTilt`, `RibbitLimiter`,
+  `RibbitGoodenizer`): effects, continuously
   in a channel's signal chain (no per-event trigger). Has `input`/`output`
   GainNodes, `params` (`{name: RibbitParam}`) as its console-facing control
   surface, and `active` as a *routing bypass* (handled by the owning channel).
+  Two things live on the base class for the dynamics/tone processors.
+  `createCrossfade(mix)` builds a **true** dry/wet fade (dry = 1 - mix)
+  rather than reverb/delay's dry-at-unity-plus-wet — the distinction is
+  whether a processor *adds* to a signal or *acts on* it, and a compressor
+  whose dry path runs at unity can never tame a peak. It drives both gains
+  from one `ConstantSourceNode` offset (once directly, once through a -1
+  inverter, both summing onto the gains' intrinsic values) specifically so a
+  *ramp* moves both sides — `RibbitParam`'s `onSet` only overrides the
+  instant-set path, which is the still-standing `RibbitDelay` limitation
+  below. `dispose()` is the duck-typed teardown a synth/modulator already
+  had, now called by `removeProcessor`/`Ribbit.dispose`: those
+  `ConstantSourceNode`s are running sources reaching `audioContext
+  .destination` through their own muted sinks, so unwiring a processor from
+  a chain doesn't stop them.
+  **`RibbitGoodenizer` is the one composite** — it builds a compressor,
+  saturator, tilt and limiter, chains them, and republishes their *actual*
+  `RibbitParam`/option objects under its own `params`/`options`. The children
+  are constructed directly rather than via `createProcessor`, so they're
+  never registered, never addressable, and never in an insert chain. Nothing
+  is reimplemented, so `/glue threshold=` and a standalone `/compressor
+  threshold=` cannot drift.
 - **`RibbitModulator`** (base of `RibbitLFO`, `RibbitCV`, `RibbitRandomNotes`,
   `RibbitMarkovPercs`, `RibbitEuclidPercs`, `RibbitPatternVariator`): a
   control source, structurally a processor's sibling (`params`, no per-event
@@ -122,6 +145,10 @@ running (this is exactly what `SessionPage.svelte`'s `onMount` cleanup is for).
   a param that fans out across more than one node (`RibbitDelay.time`). One
   shared `commands.js` function (`applyParams`) does get/set/ramp/defer for
   any of them — there is no per-object-kind duplicate of this logic.
+  **Two readers, and the distinction matters:** `get()` is the *intrinsic*
+  value (display, `/save`), `getModulated()` is the value including patches
+  (anything acting on it at trigger time). See the JS-read entry under
+  "Engine limitations".
 - **`RibbitParamSources`** (`param.js`): the factory for a param that wants
   `RibbitParam`'s whole surface (ramp/`at=`/`automate=`/be a `/patch`
   destination) but has no `AudioParam` in the audio graph to hang off —
@@ -179,8 +206,9 @@ running (this is exactly what `SessionPage.svelte`'s `onMount` cleanup is for).
   (`from → to` over `duration` beats, `curve: linear|exponential|target`, `once`
   for non-repeating ramps like a fade-in), matched against loop-relative beat
   position by the clock. Authored from the console via `automate=<param>
-  to= [from= beat= duration= curve= once]` on any channel (gain/pan),
-  processor, or modulator, listed/removed via
+  to= [from= beat= duration= curve= once]` on any channel (gain/pan **and a
+  track's synth's own params**, via `addressableParams()`), processor, or
+  modulator, listed/removed via
   `automations`/`remove_automation=<n>`/`clear_automation`, and captured in
   `/save`/session files (each console-authored event records its
   `paramKey`, so it serializes by name — see session.js). Distinct from a
@@ -238,8 +266,8 @@ opening any source file, and update it whenever a type is added or removed.
 
 `src/ribbit.js`:
 ```js
-const SYNTH_TYPES = { oscsynth: RibbitOscSynth, sampler: RibbitSampler, percsampler: RibbitPercSampler, karplus: RibbitKarplus };
-const PROCESSOR_TYPES = { reverb: RibbitReverb, delay: RibbitDelay };
+const SYNTH_TYPES = { oscsynth: RibbitOscSynth, sampler: RibbitSampler, percsampler: RibbitPercSampler, karplus: RibbitKarplus, granular: RibbitGranular, tapepad: RibbitTapePad };
+const PROCESSOR_TYPES = { reverb: RibbitReverb, delay: RibbitDelay, compressor: RibbitCompressor, saturator: RibbitSaturator, tilt: RibbitTilt, limiter: RibbitLimiter, goodenizer: RibbitGoodenizer };
 const MODULATOR_TYPES = { lfo: RibbitLFO, randomnotes: RibbitRandomNotes, cv: RibbitCV, markovpercs: RibbitMarkovPercs, euclidpercs: RibbitEuclidPercs, patternvariator: RibbitPatternVariator };
 ```
 
@@ -253,22 +281,33 @@ and is registered in `ribbit.js` exactly as above — nothing else needs to chan
 There is no folder for buses; a bus is just a plain `RibbitChannel`, not a new
 class.
 
-**Two** types carry a **host contract** beyond the registry, and they have the
-same shape — a browser can't list a directory over HTTP, so anything that
+**Three** types carry a **host contract** beyond the registry, and they have
+the same shape — a browser can't list a directory over HTTP, so anything that
 chooses from the host's library needs the host to publish what there is to
-choose from. `RibbitPatternVariator` is the second one; see the pattern-format
-section below. The first: `RibbitPercSampler`
-fills its kit at random from the host's sample library, and a browser can't
-list a directory over HTTP, so the host must serve a manifest — GET
-`/samples/manifest.json` (overridable per instance via the `manifest_url`
-constructor option) returning `{ kicks: [...], snares: [...], hats: [...],
-percs: [...] }`, each entry a path relative to the same `/samples/` prefix the
-audio files are served under. In NLLC that's
-`src/routes/samples/manifest.json/+server.js`. A missing manifest degrades to
-an empty kit plus a `console.warn`, never a throw. The manifest is cached
-per-URL in both promise and resolved form — the latter so a re-roll
-(`samples=random`) completes *synchronously* and the console echoes the kit
-it just chose rather than the one it replaced. *Removing* a type is not that in reverse — see
+choose from. `RibbitPatternVariator` is one; see the pattern-format section
+below. The other two are the sample readers: `RibbitPercSampler` fills its kit
+at random, and `RibbitGranular` picks one source recording at random, both
+from GET `/samples/manifest.json` (overridable per instance via the
+`manifest_url` constructor option) returning `{ kicks: [...], snares: [...],
+hats: [...], percs: [...], <any other folder>: [...] }`, each entry a path
+relative to the same `/samples/` prefix the audio files are served under. The
+four percussion categories are always present because percsampler's slot
+arithmetic depends on them; **every other folder is free-form**, so adding
+`static/samples/<folder>/` is the whole workflow for a new granular source
+library. In NLLC that's `src/routes/samples/manifest.json/+server.js`.
+A missing manifest degrades to an empty kit / no source plus a
+`console.warn`, never a throw.
+**Both readers go through `src/samples.js`** (`fetchSampleManifest`,
+`resolvedSampleManifest`, `sampleName`, `sampleUrl`) rather than fetching
+themselves — the samples counterpart to `pattern.js`. Both of those sit on
+**`src/library.js`**, which owns the two things they'd otherwise each copy:
+`createLibraryCache()` (per-URL caching in both promise *and* resolved form —
+the latter so a re-roll completes *synchronously* and the console echoes what
+it just chose rather than what it replaced) and `libraryUrl()`, which
+deliberately avoids bare `encodeURIComponent` — that escapes characters legal
+in a path segment, so a `,` becomes `%2C` and 404s against a static file
+server. The copies had already drifted once; there is now one.
+*Removing* a type is not that in reverse — see
 `docs/llm/removing-types.md`, since docs, code-comment examples, host-app demo
 routes, and saved session JSON (which stores a `.type` key that will then fail
 to load) all accumulate references over a type's life.
@@ -446,7 +485,10 @@ a condensed one-line summary and `help` with the full reference. An object
 may also implement an optional duck-typed `describeState()`, appended to that
 summary line, for state that is neither a param nor an option
 (`RibbitMarkovPercs` prints its generated pattern, e.g. `.sk.HhshSp.s...k`,
-since its options only describe how the rhythm was derived). Then — every
+since its options only describe how the rhythm was derived). A **synth** can
+implement it too — `channelSummary` reaches it through `channel.source`, since
+a synth isn't separately addressable — which is how a `granular` track reports
+the recording it randomly landed on. Then — every
 param's value/range plus every command it accepts, each with a usage note
 (`channelHelp`/`paramObjectHelp` in `commands.js`; a param's range is omitted
 when it was never given `min`/`max` bounds, e.g. a patch's `depth` —
@@ -659,13 +701,46 @@ and do nothing.
   around 375Hz). Consequence: pitch quantizes to a whole number of samples, so
   error stays within ~6 cents to C6 and widens to ~22 cents by G6. Nothing is
   cached — a fresh noise burst per pluck is the point.
-- Synth-level rampable `params` are live as of `percsampler`
-  (`dynamics`/`pan_spread`/`speed_spread`) — the first synth to declare
-  any. That exercises two paths that previously existed untested:
-  `channelCommand` routing them through the track's own name (`/hats
-  pan_spread=0.8 4b`) and `_resolveDest`'s fallback to
-  `channel.source.params`, which makes them valid `/patch` destinations
-  (`dest=hats.pan_spread`). `oscsynth`/`sampler` still declare none.
+- Synth-level rampable `params` are live on `percsampler`
+  (`dynamics`/`pan_spread`/`speed_spread`), `karplus`
+  (`damping`/`decay`/`brightness`), `granular` (nine) and `tapepad` (eleven);
+  `oscsynth`/`sampler` declare none. `channelCommand` routes them through the
+  track's own name (`/hats pan_spread=0.8 4b`), `_resolveDest` falls back to
+  `channel.source.params` so they work as `/patch` destinations
+  (`dest=hats.pan_spread`), and `addressableParams()` does the same for
+  `automate=` — but see the next entry for *when* a patched value is read.
+- **A JS-read param reads its patches through `getModulated()`, not `get()`.**
+  `RibbitParam.get()` returns `audioParam.value`, which by spec is the
+  *intrinsic* value: automation is reflected in it, an incoming node
+  connection never is. So every param whose owner reads it in JavaScript at
+  trigger time — most **synth** params, and `velocity`/`swing`/`probability`/
+  `dropout` on an **event-generating** modulator — calls `getModulated()`
+  instead, which reads the summed value off an `AnalyserNode` tapping the
+  backing `ConstantSourceNode`'s **output** (built lazily by
+  `RibbitParamSources.create`, on the first patch to land there; `RibbitPatch`
+  announces itself via `attachPatch`/`detachPatch`). Params *consumed as
+  audio* never needed this and are unchanged: channel `gain`/`pan`, every
+  processor param, `RibbitLFO.freq`, `RibbitCV.value`, a patch's own `depth`.
+  **The two readers must stay separate**: `snapshotSession` calls `get()` on
+  everything, and saving a momentarily-modulated value would corrupt every
+  session file. The tap is one render quantum behind, so a patched param read
+  at trigger time is the modulator's value at *command* time, not note time.
+- **A synth's params need not all be the JS-read kind.** `tapepad` is the
+  worked example: five of its eleven (`wow`/`wow_rate`/`flutter`/`hiss`/`sat`)
+  wrap real single-node `AudioParam`s on persistent shared nodes, so they are
+  *continuous* — a ramp or a patch moves them during a sustained chord — while
+  the six on `RibbitParamSources` are read once per trigger and so move note by
+  note. Nothing in the command surface distinguishes them; the difference is
+  only in *when* the change is heard. Consequence worth knowing when testing:
+  `getModulated()` on one of the continuous five returns the intrinsic value,
+  because a param wrapping a real audio node's `AudioParam` has no tap and
+  doesn't need one — the summing happens in the graph, not in JS.
+- **`automate=` reaches a track's synth params**, via `addressableParams()`
+  (`param.js`) — the one place that knows a channel's surface includes its
+  synth's. Used by `automate=`, the `automations` listing, completion, and
+  session serialize/rebuild, so all five agree. `setTrackSynth` re-aims any
+  automation the new synth also declares by name and drops the rest, rather
+  than leaving the clock ramping a param on a disposed synth.
 - `/save`/session files capture loop automation by param name — but an
   `RibbitAutomationEvent` constructed in code against a bare `AudioParam`
   (no `paramKey`) is skipped, and a rebuilt `once` event fires once more
@@ -674,12 +749,20 @@ and do nothing.
   type-changed *track* synth is swapped back properly) — a modulator whose
   name survived but whose type changed since the save keeps its live type,
   with saved params/options applied only where the names still fit.
-- `RibbitSampler`/`RibbitPercSampler` sample loading is unawaited
-  fire-and-forget; a trigger before load completes silently no-ops (also
-  true after a runtime `samples=` swap). `RibbitPercSampler` additionally
-  depends on a host-served manifest (`/samples/manifest.json` by default,
-  see the type note above) to know what it may pick from — no manifest
-  means an empty kit and a `console.warn`, not an error.
+- `RibbitSampler`/`RibbitPercSampler`/`RibbitGranular` sample loading is
+  unawaited fire-and-forget; a trigger before load completes silently no-ops
+  (also true after a runtime `samples=`/`sample=` swap). The latter two
+  additionally depend on a host-served manifest (`/samples/manifest.json` by
+  default, see the type note above) to know what they may pick from — no
+  manifest means an empty kit / no source and a `console.warn`, not an error.
+  `RibbitGranular` is the one that makes file *size* matter: it holds a whole
+  decoded recording (the shipped library has four-minute ones), doubled if
+  `direction` is not `forward`, since Web Audio has no backwards playback so a
+  reversed copy must be built. It peak-normalizes each source on load (capped
+  20x) because an unmastered library spans ~30dB and a random roll would
+  otherwise invalidate every mix decision. Its per-note cost is a whole cloud
+  of grains at 3 nodes each, scheduled up front and capped at 400 (over
+  budget, the cloud thins rather than truncating).
 - `splitCommands` (multi-command-per-line) assumes no param value contains a
   literal `/`; none currently do, but a value that did would be mis-split.
 - A session naming a removed type fails cleanly (`assertKnownTypes`, see
@@ -687,11 +770,26 @@ and do nothing.
   load, so a file saved outside the repo before a type was removed has to
   be hand-edited. That's the standing cost of removing a shipped type (see
   `docs/dev/removing-a-type.md`).
-- Ramping/deferred `at=` scheduling/loop automation on a multi-node param
-  (`RibbitDelay`'s `time`/`feedback`) only animates the "primary" node
-  directly — the other node (e.g. delay's R side) only gets updated
-  correctly by a plain, immediate (non-ramped, non-deferred) instant set.
-  Pre-existing limitation, unchanged by the `RibbitParam` consolidation.
+- Ramping/deferred `at=` scheduling/loop automation on an **`onSet`-based**
+  multi-node param (`RibbitDelay`'s `time`/`feedback`) only animates the
+  "primary" node directly — the other node (e.g. delay's R side) only gets
+  updated correctly by a plain, immediate (non-ramped, non-deferred) instant
+  set. This is now a limitation of `onSet` specifically, not of multi-node
+  params in general: the `ConstantSourceNode`-into-several-`AudioParam`s
+  technique (`RibbitProcessor.createCrossfade`, `RibbitTilt`'s `tone`/`pivot`)
+  drives every target correctly through ramps too. `RibbitDelay` has not been
+  converted — its two delay times differ by `stereoOffset` rather than being
+  a fixed ratio, so it needs a summed offset node rather than a straight
+  scaler, and nobody has needed it enough yet.
+- `RibbitLimiter` (and the `goodenizer`'s limiter stage) is a fast, high-ratio
+  `DynamicsCompressorNode`, **not a lookahead brickwall** — Web Audio offers no
+  lookahead, so a fast enough transient can exceed `ceiling`. Treat it as
+  "about here", which is why it defaults to `-1` rather than `0`.
+- `RibbitSaturator`'s curves are normalized to unity *slope at the origin*, so
+  each `character` has a different output level once `drive` pushes into the
+  bend (a wavefolder ends up quieter than a clipper). `level` is the trim.
+  Switching `character` at high drive therefore changes loudness as well as
+  timbre; this is intended, not compensated.
 - Send routing (`out=`/`add_send=`) only guards against a channel sending
   directly to itself (`addSend` throws) — a longer cycle (e.g. `bus1` sends to
   `bus2`, which sends back to `bus1`) isn't detected. Native Web Audio permits

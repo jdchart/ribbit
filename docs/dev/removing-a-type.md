@@ -36,6 +36,27 @@ There is **no** separate list of type names in `commands.js`, no
 and no UI-side registry in `nllc` — a mixer strip renders from the live
 object, not from its type.
 
+### Check whether another type imports it
+
+Deleting the file is only safe if nothing else in `src/` imports it. Most
+types are independent, but two dependencies exist today, both among the
+processors:
+
+- **`RibbitGoodenizer` is a composite** — it imports and constructs
+  `RibbitCompressor`, `RibbitSaturator`, `RibbitTilt` and `RibbitLimiter`
+  directly. Removing any one of those four breaks it, and the breakage is a
+  module-resolution error at import time rather than a clean
+  `unknown processor type` at the console. Either remove the goodenizer too, or
+  rework it first.
+- **`formatReduction`** is defined in `processors/compressor.js` and imported by
+  `processors/limiter.js` and `processors/goodenizer.js`. If `compressor` goes,
+  that helper needs a new home before its file is deleted.
+
+`grep -rn "processors/<type>" src/` (or `synths/`, `modulators/`) before
+deleting anything. This is the general shape of the problem §2 is about — a
+type accumulates references over its life — but these ones break the *build*,
+so they belong in §1.
+
 ## 2. Engine: trailing references
 
 None of these break anything. All of them leave the docs lying about what
@@ -86,9 +107,12 @@ Precedents in this codebase, both from removing `noon`:
 - The `_resolveDest` fallback to `channel.source.params`, which makes a
   *synth's* own param reachable as a patch destination (`dest=track_1.cutoff`).
   **Kept** — and no longer hypothetical: `percsampler`
-  (`dynamics`/`pan_spread`/`speed_spread`) and `karplus`
-  (`damping`/`decay`/`brightness`) both declare params, so this path is
-  exercised in tree rather than merely defended.
+  (`dynamics`/`pan_spread`/`speed_spread`), `karplus`
+  (`damping`/`decay`/`brightness`) and `granular` (nine of them) all declare
+  params, so this path is exercised in tree rather than merely defended.
+  (It resolves and connects; whether the patch *moves* anything is a separate,
+  currently-negative question — see `param.js` in
+  [source-overview.md](source-overview.md#paramjs).)
 
 A sibling type built alongside the one you're removing (the `cv` modulator,
 in noon's case) is a separate decision — judge it on its own merits, not by
@@ -132,13 +156,15 @@ for, and remove:
 - **Doc references** — `nllc/README.md` and `nllc/docs/{user,dev,llm}/`
   each enumerate the available routes and the contents of `static/sessions/`.
 - **Any samples or assets** the type fetched from `static/`, if nothing else
-  uses them. Two types currently own a `static/` tree and a manifest route
-  each: `percsampler` (`static/samples/`,
-  `src/routes/samples/manifest.json/+server.js`) and `patternvariator`
-  (`static/patterns/`, `src/routes/patterns/manifest.json/+server.js`).
-  Removing either means removing its route too, not just the files — and note
-  a *pattern pack* is content rather than code, so it survives independently
-  of any one modulator.
+  uses them. Two `static/` trees have a manifest route each, but **three types
+  read them**: `static/samples/` (`src/routes/samples/manifest.json/+server.js`)
+  serves both `percsampler` and `granular`, and `static/patterns/`
+  (`src/routes/patterns/manifest.json/+server.js`) serves `patternvariator`.
+  So removing `percsampler` alone must *not* take the samples route with it —
+  check the other reader first. On the engine side both sample readers go
+  through `src/samples.js`, which is dead only when neither remains. Note that
+  a *pattern pack* or a folder of samples is content rather than code, and
+  survives independently of any one type.
 
 Note `.svelte-kit/` will still contain generated references to a deleted
 route; that's a build artifact and regenerates on the next `npm run dev`.

@@ -28,10 +28,67 @@ export class RibbitParam {
         // `audioParam` itself (the "primary" node) — a pre-existing
         // limitation for those multi-node params, unchanged by this class.
         this._onSet = onSet;
+
+        // Modulation reading — see getModulated(). `_tap` is an AnalyserNode
+        // watching the *output* of the node this param's AudioParam belongs
+        // to, built lazily by _createTap (installed by RibbitParamSources)
+        // the first time a patch actually lands here. `_patchCount` is how
+        // many live patch cables are connected, so an unpatched param never
+        // pays for the tap and never reads a stale buffer.
+        this._createTap = null;
+        this._tap = null;
+        this._tapBuffer = null;
+        this._patchCount = 0;
     };
 
+    // The param's *intrinsic* value: what was last set or ramped here.
+    //
+    // Deliberately blind to patches. By the Web Audio spec an AudioParam's
+    // `.value` reflects its intrinsic value only — automation is folded in,
+    // an incoming node connection never is — and that's exactly the reading
+    // display and serialization want: /save must record "position is 0.2",
+    // not "0.7, because an LFO happened to be up when the file was written".
+    // Anything deciding what to *do* at trigger time wants getModulated().
     get() {
         return this.decode(this.audioParam.value);
+    };
+
+    // The value including whatever is patched in — the number a synth or
+    // generator should act on.
+    //
+    // A patch is an audio-rate connection into the AudioParam, and there is
+    // no way to read the summed result off the param itself. The one place it
+    // becomes visible is the owning node's output, so a patched param grows
+    // an AnalyserNode there and reads the last rendered sample. Falls back to
+    // get() when nothing is patched (the common case, and free) or when this
+    // param has no tap to build — a param wrapping a real audio node's
+    // AudioParam does its own work with the summed value and is never read
+    // from JS.
+    //
+    // The value is one render quantum old, and notes are scheduled a little
+    // ahead of the clock, so this is "the modulator's value at command time",
+    // not at note time. For LFO-into-grain-position gestures that difference
+    // is inaudible; a sample-accurate read would mean doing the work in an
+    // AudioWorklet instead.
+    getModulated() {
+        if (!this._patchCount || !this._tap) return this.get();
+        this._tap.getFloatTimeDomainData(this._tapBuffer);
+        return this.clamp(this.decode(this._tapBuffer[this._tapBuffer.length - 1]));
+    };
+
+    // Called by RibbitPatch as cables come and go (see patch.js). The count,
+    // rather than a boolean, because several patches can share one
+    // destination — summing at the param is legitimate modular routing.
+    attachPatch() {
+        this._patchCount += 1;
+        if (this._patchCount === 1 && !this._tap && this._createTap) {
+            this._tap = this._createTap();
+            this._tapBuffer = new Float32Array(this._tap.fftSize);
+        }
+    };
+
+    detachPatch() {
+        this._patchCount = Math.max(0, this._patchCount - 1);
     };
 
     set(value) {
@@ -42,6 +99,20 @@ export class RibbitParam {
     clamp(value) {
         return Math.max(this.min, Math.min(this.max, value));
     };
+};
+
+// Every param addressable on an object, its synth's included.
+//
+// A track's synth isn't independently addressable — its params live on the
+// channel's surface (`/lead cutoff=800`, `/patch dest=lead.position`), and
+// this is that same rule in one place, for the generic surfaces that need
+// the whole map at once rather than one key at a time: automate=, the
+// automations listing, session (de)serialization, and completion. The
+// channel's own params win a name collision, matching channelCommand's
+// precedence. Objects without a synth (processors, modulators, buses) just
+// get their own map back.
+export function addressableParams(object) {
+    return object.source?.params ? { ...object.source.params, ...object.params } : object.params;
 };
 
 // Backing store for params that have no AudioParam of their own.
@@ -71,6 +142,7 @@ export class RibbitParamSources {
         this.audioContext = audioContext;
         this.sources = [];
         this.sinks = [];
+        this.taps = [];
     };
 
     // Creates one silent-backed RibbitParam. `min`/`max` are declared once
@@ -88,7 +160,36 @@ export class RibbitParamSources {
 
         this.sources.push(source);
         this.sinks.push(sink);
-        return new RibbitParam(source.offset, { min, max, ...options });
+
+        const param = new RibbitParam(source.offset, { min, max, ...options });
+        // The node behind the param, exposed for the one case that needs more
+        // than its value: a param that is *also* an audio-rate control signal
+        // driving real AudioParams elsewhere in the graph. RibbitProcessor's
+        // createCrossfade() connects this into two gains (one inverted) so a
+        // single param moves both sides of a dry/wet fade — which onSet
+        // deliberately cannot do, since onSet only overrides the instant-set
+        // path and leaves a *ramp* animating one node (see RibbitParam's note
+        // on multi-node params). Ignored by params that are only ever read.
+        param.sourceNode = source;
+
+        // How this param reads its patches (see RibbitParam.getModulated).
+        // The analyser is spliced into the existing source -> sink path
+        // rather than hung off the side, because an AnalyserNode whose
+        // output goes nowhere isn't reachable from the destination and so
+        // isn't guaranteed to be pulled — the same "connected enough to stay
+        // live" reasoning the muted sink itself exists for. Built on demand:
+        // a granular track declares nine of these params and typically
+        // patches none of them.
+        param._createTap = () => {
+            const analyser = this.audioContext.createAnalyser();
+            analyser.fftSize = 32; // the minimum; a DC control signal needs one sample
+            source.disconnect(sink);
+            source.connect(analyser).connect(sink);
+            this.taps.push(analyser);
+            return analyser;
+        };
+
+        return param;
     };
 
     // Called from the owner's own duck-typed dispose() (see
@@ -98,8 +199,10 @@ export class RibbitParamSources {
     // undisposed owner would leave running nodes behind.
     dispose() {
         for (const source of this.sources) source.stop();
+        for (const tap of this.taps) tap.disconnect();
         for (const sink of this.sinks) sink.disconnect();
         this.sources = [];
         this.sinks = [];
+        this.taps = [];
     };
 };

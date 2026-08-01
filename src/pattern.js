@@ -18,6 +18,7 @@
 // quoted, because a silently-dropped note in a hand-edited file is the one
 // failure mode that wastes an afternoon.
 
+import { libraryUrl, fetchJSON, createLibraryCache } from "./library.js";
 import { PERC_CATEGORIES } from "./synths/percsampler.js";
 
 // Where the host publishes "what pattern packs exist". Exactly the contract
@@ -158,37 +159,23 @@ export function cellAt(cells, step) {
 // Loading
 // ---------------------------------------------------------------------------
 
-// Same two-level cache RibbitPercSampler uses for its sample manifest, for the
-// same two reasons: caching the *promise* collapses concurrent requests from
-// several generators built together, and keeping a separately *resolved* copy
-// means a live re-roll (`pattern=random`) completes synchronously, so the
-// console echoes the pattern it just chose rather than the one it replaced.
-// A failure isn't cached — the entry is dropped so a later attempt can retry.
-const manifestCache = new Map();
-const resolvedManifests = new Map();
-const patternCache = new Map();
+// The same two-level cache samples.js uses for its manifest, from the same
+// shared helper — caching the *promise* collapses concurrent requests from
+// several generators built together, and the separately *resolved* copy means
+// a live re-roll (`pattern=random`) completes synchronously, so the console
+// echoes the pattern it just chose rather than the one it replaced.
+const manifests = createLibraryCache();
 
-async function fetchJSON(url) {
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-    return response.json();
-};
+// Pattern files get their own cache with the same shape: the loaded value is
+// the *parsed* pattern rather than raw JSON, so a reseed pays the parse once.
+const patterns = createLibraryCache();
 
 export function fetchPatternManifest(url = MANIFEST_URL) {
-    if (!manifestCache.has(url)) {
-        manifestCache.set(url, fetchJSON(url).then((manifest) => {
-            resolvedManifests.set(url, manifest);
-            return manifest;
-        }).catch((error) => {
-            manifestCache.delete(url);
-            throw error;
-        }));
-    }
-    return manifestCache.get(url);
+    return manifests.get(url);
 };
 
 export function resolvedPatternManifest(url = MANIFEST_URL) {
-    return resolvedManifests.get(url) ?? null;
+    return manifests.resolved(url);
 };
 
 // Every pack name in a manifest, and every pattern path within one pack.
@@ -210,14 +197,6 @@ export function patternName(path) {
 // for the life of the page, and re-reading it on every reseed would be a
 // network round trip inside what should be an instant gesture.
 export function fetchPattern(path, { base = "/patterns" } = {}) {
-    const url = `${base}/${String(path).split("/").map(encodeURIComponent).join("/")}`;
-    if (!patternCache.has(url)) {
-        patternCache.set(url, fetchJSON(url)
-            .then((raw) => parsePattern(raw, { source: patternName(path) }))
-            .catch((error) => {
-                patternCache.delete(url);
-                throw error;
-            }));
-    }
-    return patternCache.get(url);
+    return patterns.get(libraryUrl(path, base), async (url) =>
+        parsePattern(await fetchJSON(url), { source: patternName(path) }));
 };

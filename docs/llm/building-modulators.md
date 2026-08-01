@@ -140,4 +140,10 @@ control that does nothing. Reserve params for values read fresh inside
 `steps` are options; `velocity`/`swing` are params, and `patternvariator`
 splits the same way with `seed`/`variation`/`density`).
 
+Read those params with **`getModulated()`, not `get()`**, inside
+`generateEvents` — that's what lets a `/patch` into `velocity`/`swing`/
+`dropout` actually reach them (`get()` can't see a patch; see `param.js`).
+The value is sampled once per generated event, so a patched LFO shapes the
+pattern event by event.
+
 Removing a type again later: `docs/llm/removing-types.md`.

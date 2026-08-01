@@ -67,7 +67,29 @@ generic `output.disconnect()` in `removeModulator`/`removeTrack` never
 touches them. This was open-coded in three classes before, each re-explaining
 the quirk and keeping its own parallel `_sinks` array.
 
-`.get()`/`.set(value)`/`.clamp(value)` are the whole public surface;
+> **There are two readers, and picking the wrong one is a real bug.**
+> `get()` returns the *intrinsic* value: `audioParam.value` reflects direct
+> assignment and scheduled automation, but never the signals connected *into*
+> the param — the summed "computed value" isn't readable from JS at all.
+> `getModulated()` is the one that sees patches, by tapping an
+> `AnalyserNode` on the backing `ConstantSourceNode`'s **output**, where the
+> sum does become visible. The tap is built lazily, on the first patch to
+> land (`RibbitPatch` calls `attachPatch`/`detachPatch`), so an unpatched
+> param costs nothing and an unpatched read short-circuits to `get()`.
+>
+> **The rule:** anything deciding what to *do* with a value calls
+> `getModulated()` — every synth's `trigger()`, every generator's
+> `generateEvents()`. Anything *recording or displaying* the value calls
+> `get()`. `snapshotSession` calls `get()` on everything, and saving "0.7,
+> because an LFO happened to be up" would corrupt every session file. Params
+> consumed by the audio graph itself (channel `gain`/`pan`, processor params,
+> `RibbitLFO.freq`, `RibbitCV.value`, a patch's `depth`) never read either
+> one — the graph does the summing. Because the tap reads the last rendered
+> quantum, a patched value is one quantum old: fine for per-note reads,
+> useless for sample-accurate work.
+
+`.get()`/`.getModulated()`/`.set(value)`/`.clamp(value)` are the whole public
+surface;
 `.audioParam` is public too, and is what `commands.js`'s `applyParams` reaches
 into directly for ramping/deferred scheduling. Before this class existed, a
 param's `.params` entry (a hand-written `{get,set}` closure) and its
@@ -96,6 +118,48 @@ part of the document.**
 Extracted here on reaching a third caller (`markovpercs`, `euclidpercs`,
 `patternvariator`) — the same threshold that moved `_stride()` onto
 `RibbitModulator`.
+
+## `library.js`
+
+Everything `samples.js` and `pattern.js` both need to read the host's static
+files, in one place. Exports `libraryUrl`, `fetchJSON` and
+`createLibraryCache`. Two things worth knowing:
+
+- **`libraryUrl` deliberately does not use bare `encodeURIComponent`.** That
+  function is for query *values*: it escapes characters that are legal inside
+  a path segment, and a static file server matches the raw path, so an escaped
+  one is simply a different, nonexistent file. The comma is the one that bites
+  — `Cala Llombards, Sea Urchins.wav` serves fine literally and 404s as
+  `%2C`. The RFC 3986 sub-delims (plus `:` and `@`) are put back after
+  encoding. This was latent in `percsampler` from the start, invisible until a
+  library contained a filename with a comma, and *separately* latent in
+  `fetchPattern` — the two copies had already drifted, which is why there is
+  now only one.
+- **`createLibraryCache()` is the two-level cache.** A file is cached per URL
+  as a *promise* (collapsing concurrent construction — several sample-backed
+  tracks built together share one request) and, once settled, as a *resolved
+  value*. The second layer is what lets a re-roll take a **synchronous** path:
+  awaiting even a settled promise costs a microtask, which is long enough for
+  `applyOptions` to have printed its confirmation line, so a re-roll would
+  otherwise echo the sample it just replaced. A failure isn't cached, so a
+  later attempt can retry. `get(url, load)` takes an optional loader for a
+  caller whose cached value is *derived* from the response — `pattern.js`
+  caches the parsed pattern, so a reseed pays the parse once.
+
+## `samples.js`
+
+The host's sample library: what files it serves, and how a synth finds out.
+The samples counterpart to `pattern.js` below — a shared *loader*, not a type,
+so that `synths/percsampler.js` and `synths/granular.js` share one fetch and
+one set of naming rules instead of each inventing their own. The caching and
+URL building come from `library.js` above; what's left here is
+`SAMPLE_MANIFEST_URL`, `sampleName`, `sampleFolders`, and thin wrappers
+(`sampleUrl`, `fetchSampleManifest`, `resolvedSampleManifest`) that bind the
+`/samples` base.
+
+**Folders aren't fixed.** The four percussion categories are a `percsampler`
+concept, not a manifest one; anything else the host publishes is an ordinary
+folder that `granular` can read by name.
 
 ## `pattern.js`
 
@@ -138,12 +202,10 @@ A drum cell holds `{ variant, gain }`, **never a finished slot number** —
 `variant: 0`, so a variator can re-pick an unspecified slot without overriding a
 deliberate one.
 
-Loading mirrors `percsampler` exactly, including the two-level cache
-(`manifestCache` promises + `resolvedManifests` values + `patternCache`): the
-promise collapses concurrent fetches from several variators built together,
-and the separately-resolved copy makes a live re-pick *synchronous*, so the
-console echoes the pattern it just chose rather than the one it replaced.
-Host contract: `GET /patterns/manifest.json` → `{ <pack>: ["<pack>/<n>.json"] }`.
+Loading goes through `library.js` — two `createLibraryCache()` instances, one
+for the manifest and one for pattern files, the latter caching the *parsed*
+pattern so a reseed pays the parse once. Host contract:
+`GET /patterns/manifest.json` → `{ <pack>: ["<pack>/<name>.json"] }`.
 
 ## `event.js`
 
@@ -361,14 +423,11 @@ tension with this one's category structure.
 Three things worth knowing before editing it:
 
 - **The manifest.** Random selection needs to know what files exist, which a
-  browser can't discover, so `fetchManifest` GETs `/samples/manifest.json`
-  (per-instance `manifest_url`). It's cached per URL twice over — as a
-  promise (collapsing concurrent construction) and, once settled, as a
-  resolved object in `resolvedManifests`. The second cache exists so
-  `_randomize()` can take a **synchronous** path: awaiting even a settled
-  promise costs a microtask, which is long enough for `applyOptions` to have
-  printed its confirmation line, so a re-roll would echo the kit it just
-  replaced.
+  browser can't discover, so the host serves `/samples/manifest.json`
+  (per-instance `manifest_url`). The fetching, caching and naming all live in
+  **`samples.js`** (see above) rather than here, since `granular` reads the
+  same library — this file just calls `fetchSampleManifest` /
+  `resolvedSampleManifest` and picks from the four keys it cares about.
 - **Placeholders keep slot indices absolute.** A category outside
   `this.categories` still occupies its slots, filled with `null`. That's the
   whole mechanism behind splitting a kit across tracks: a generator emits
@@ -389,8 +448,11 @@ gain on every category, while `pan_spread` and `speed_spread` apply per the
 `RANDOMIZATION` table (kicks opt out of both so they keep anchoring the
 track). The `StereoPannerNode` is built only when it would do something.
 These are the engine's first rampable **synth** params, so this is also the
-first exercise of `channelCommand`'s synth-param routing and of
-`_resolveDest`'s `channel.source.params` fallback (`dest=hats.pan_spread`).
+first exercise of `channelCommand`'s synth-param routing. They're read with
+`getModulated()`, which is what makes `dest=hats.pan_spread` a working patch
+destination (`_resolveDest` falls back to `channel.source.params` to resolve
+it) — sampled once per hit, so a patched LFO varies the spread hit by hit.
+See `param.js` above.
 
 ## `synths/karplus.js` — `RibbitKarplus extends RibbitSynth`
 
@@ -434,6 +496,115 @@ as a *mute* when it's shorter than the ring, since a plucked string doesn't
 stop when the written note ends. Note the `source.stop()` call must follow
 `source.start()` — stopping an unstarted source throws `InvalidStateError`.
 
+## `synths/granular.js` — `RibbitGranular extends RibbitSynth`
+
+One source recording, played as a cloud of short windowed grains. The second
+synth to read the host's sample library (through `samples.js`), the second
+polyphonic one, and the first whose per-note cost is *many* nodes rather than
+one or two.
+
+**The structure is two stages, and keeping them apart is the design.** A note
+is `voice envelope x sum of grains`: `attack`/`release` are on one
+`GainNode` per note, `density`/`grain_size`/`spray`/`position`/`drift`/
+`pitch_spread`/`pan_spread` govern what gets scheduled into it. Every grain of
+a note is placed on the audio clock inside `trigger()` — no timers, nothing
+running between notes — which is also why polyphony is free.
+
+Five things worth knowing before editing it:
+
+- **Grain windows are shared, unit-amplitude `Float32Array`s** (`WINDOWS`,
+  built lazily per shape and cached module-wide), applied with
+  `setValueCurveAtTime`. They can stay at unit amplitude *because* the note's
+  level lives on the voice gain — which is what keeps a 400-grain note from
+  allocating 400 curve arrays. The last point of every curve is forced to 0:
+  the curve holds its final value afterwards, so a grain ending at 0.007 would
+  leave a DC step on that gain node.
+- **Timing jitter is not a taste setting.** `TIME_JITTER` scatters each grain
+  by up to half the nominal interval, because a perfectly periodic cloud
+  amplitude-modulates itself at exactly `density` Hz — a 30Hz buzz over
+  everything at 30 grains/second.
+- **Read positions wrap inside `duration - consumed`, not inside the buffer.**
+  A grain that starts near the end would otherwise run off it and leave a
+  hole. `consumed` accounts for `playbackRate`, since a transposed grain eats
+  more or less material than its output length.
+- **`_measure` gain-matches each source on load** (peak, capped at
+  `MAX_NORMALIZE`). Not a nicety: a field-recording library isn't mastered —
+  the shipped `foley` folder spans ~30dB — so without it `sample=random` moves
+  a track's level by 30dB and every mix decision has to be redone after every
+  roll. Long buffers are strided rather than scanned whole; this runs on the
+  main thread right after a decode.
+- **Reverse needs a mirrored copy** (`_ensureReversed`) because Web Audio has
+  no backwards playback — a negative `playbackRate` is undefined for
+  `AudioBufferSourceNode`. It's built when the `direction` option is set, not
+  at trigger time: a few hundred milliseconds of copying is nothing when you
+  type a command and a glitch when a note starts. Reading it means mirroring
+  the position too (`duration - read - consumed`).
+
+The `_generation` counter guards stale rolls exactly as in `percsampler`, and
+for the same reason. `describeState()` reports the source, its length and any
+gain match — the first synth to implement that hook, and the reason
+`channelSummary` now calls it (a randomly-chosen source is otherwise invisible
+from the console). `MAX_GRAINS` thins a note's cloud by stretching the
+interval rather than truncating it: a texture that gets grainier is a texture,
+a pad that stops halfway through is a bug you can hear.
+
+## `synths/tapepad.js` — `RibbitTapePad extends RibbitSynth`
+
+A polyphonic subtractive pad running through a tape machine. The third
+polyphonic synth, and the first with **persistent nodes of its own** —
+everything before it either built only one-shots per note or held nothing but
+decoded buffers.
+
+**Two halves, and the split is the design.** Per note, `trigger()` builds an
+ordinary voice: `voices` detuned oscillators, panned across the field by
+`pan_spread` in the same order they're detuned, into one lowpass (swept open
+across the attack and eased back over the tail) and one attack/sustain/release
+gain. Shared and always running: a **transport** (the `wow` and `flutter`
+drift signals summed into `_pitchMod`, which every live oscillator's `detune`
+is connected to) and a **tape stage** (`_satGain` → tanh `WaveShaper` →
+bit-crush `WaveShaper` → fixed bandwidth lowpass), with hiss joining after the
+curves.
+
+Five things worth knowing before editing it:
+
+- **The transport is shared because a tape machine has one capstan.** Per-voice
+  drift is an ensemble chorus; one signal fanning into every voice is what
+  reads as a warped recording. This isn't only aesthetics — it's what makes
+  `wow`/`wow_rate`/`flutter` real single-node `AudioParam`s rather than
+  JS-read values, so they ramp and take patches *continuously*. This file is
+  therefore the example for **a synth whose params are of both kinds** (see
+  `creating-a-synth.md`); `this.params` is assembled in two passes, real
+  `AudioParam`s first and `RibbitParamSources` entries `Object.assign`ed on
+  top.
+- **The tape stage is shared for a second reason**: saturating each voice
+  separately and then summing gives a clean sum of dirty voices. Running the
+  summed chord into one curve is what gets the voices intermodulating, which
+  is where the dirt actually comes from.
+- **`buildDrift` sums sines at *whole* cycle counts** over the buffer, at
+  random phase. Whole counts are what let the buffer loop without a seam; the
+  counts are primes so the sum doesn't repeat before the whole loop does. The
+  alternative — filtered noise — needs a crossfade at the seam, and a
+  crossfade in a signal this slow is audible as a hesitation once per pass.
+  The buffers are tiny (`DRIFT_POINTS`) and played back at a rate well under
+  1, so they're control signals rather than sounds; `wow_rate` is a
+  `RibbitParam` on that `playbackRate` with `encode`/`decode` hiding the base
+  rate from the user.
+- **`buildSatCurve` normalizes to unity slope at the origin**, not unity peak —
+  the same convention as `processors/saturator.js`, whose long comment is the
+  one to read. Consequence: `sat` gets louder as well as dirtier, and the
+  track's `gain` is the balance control.
+- **`bits` is an option, not a param**, because setting it rebuilds a
+  `Float32Array` (same reason as saturator's `character`). Quantization finer
+  than `CRUSH_POINTS`' spacing is smoothed straight back out by the
+  `WaveShaper`'s own interpolation, which is why 12 and up is effectively
+  clean rather than a subtly wrong 16-bit.
+
+`dispose()` is mandatory here rather than optional: the transport and hiss
+sources run forever once started, and `removeTrack`/`setTrackSynth` only do a
+generic `output.disconnect()`. The same persistence means hiss is audible while
+the track is stopped — `active` gates event scheduling, not audio, and a tape
+machine hissing through a pause is the intended behaviour.
+
 ## `processor.js` — `RibbitProcessor` (base)
 
 Mirrors `RibbitSynth`: `name`, `input`/`output` (both `GainNode`s — subclasses wire
@@ -444,6 +615,39 @@ surface the command router uses for `/reverb wet=0.5` and `/reverb help`),
 `options` (same declarative non-rampable-settings map as `RibbitSynth.options`
 — `RibbitReverb` uses it for `duration`/`decay`, whose setters rebuild the
 impulse response in place), and `automation`.
+
+Two shared behaviours also live here.
+
+`createCrossfade(mix)` builds a **true** dry/wet fade (dry = 1 - mix) and
+returns `{ param, dryGain, wetGain }` with the dry side pre-wired
+(`input → dryGain → output`); the caller connects its wet chain into `wetGain`.
+This is deliberately not what `reverb`/`delay` do — they keep dry at unity and
+*add* wet, which is right for an effect layered beside a signal and wrong for
+anything that acts on the signal itself, since a compressor's untouched dry
+path would carry exactly the peaks it exists to control. It also yields
+parallel processing for free at `mix=0.5`.
+
+The implementation is why it lives on the base class rather than being
+open-coded per processor: one value has to drive two gains in opposite
+directions, and `RibbitParam`'s `onSet` only overrides the instant-set path, so
+a *ramp* would move the wet side and strand the dry side — the same multi-node
+limitation `RibbitDelay` still carries. Instead the param is a
+`ConstantSourceNode`'s offset (via `RibbitParamSources`, which also handles the
+silent-sink quirk that would otherwise make its scheduled automation unreadable
+on `.value`), connected into both gains — once directly, once through a `-1`
+inverter. `AudioParam` connections *sum* onto the intrinsic value, so
+`dryGain`'s intrinsic 1 minus mix and `wetGain`'s intrinsic 0 plus mix track a
+single param exactly, through instant sets, ramps, deferred `at=` and `/patch`
+alike.
+
+`dispose()` is the duck-typed teardown, called by `Ribbit.removeProcessor` and
+`Ribbit.dispose` — the same hook synths and modulators already had, extended to
+processors when `createCrossfade` arrived. It's needed because those
+`ConstantSourceNode`s are running sources reaching `audioContext.destination`
+through their own muted sinks, so they aren't reachable from `this.output` and
+unwiring a processor from a chain doesn't stop them. The base implementation
+disposes `this._paramSources`; `RibbitGoodenizer` overrides it to also tear
+down its four children.
 
 ## `processors/reverb.js` — `RibbitReverb extends RibbitProcessor`
 
@@ -467,6 +671,108 @@ R side) — ramping/deferred `at=` scheduling still only animates the L side
 directly, a pre-existing limitation unchanged by the `RibbitParam` consolidation.
 `wet` is a plain single-node `RibbitParam`. Same `get time()`/`get feedback()`/
 `get wet()` alias pattern as `RibbitReverb`.
+
+## `processors/compressor.js` — `RibbitCompressor extends RibbitProcessor`
+
+A thin, honest wrapper around Web Audio's `DynamicsCompressorNode` (a real
+feed-forward compressor with proper gain computation — not worth
+reimplementing), plus a `makeupGain` after it and a `createCrossfade` around
+both. All five node params (`threshold`/`ratio`/`attack`/`release`/`knee`) are
+plain single-node `RibbitParam`s at the node's own documented ranges.
+
+Makeup gain isn't decoration: compression only ever takes level away, so
+without it a compressor is a volume drop. The crossfade is what makes parallel
+compression possible.
+
+`describeState()` reports live gain reduction. That's exported as
+`formatReduction(compressorNode)` because `DynamicsCompressorNode.reduction` is
+a plain float in the current spec, was an `AudioParam` in the original one, and
+is absent entirely from a stub context — a display-only value must not throw
+inside a summary line. `RibbitLimiter` and `RibbitGoodenizer` reuse it.
+
+## `processors/saturator.js` — `RibbitSaturator extends RibbitProcessor`
+
+`driveGain → WaveShaperNode → levelGain`, inside a crossfade. The split is the
+design: `drive` is a pre-gain and therefore a real `AudioParam` that ramps,
+while the curve *shape* is an option, since it rebuilds a `Float32Array`.
+Folding drive into the curve instead would have made it non-rampable for
+nothing.
+
+**`buildCurve` normalizes to unity slope at the origin, not unity peak** — read
+its comment before touching this file, because it was wrong the other way
+round first. Peak normalization maximizes a curve's low-level gain: `tanh(3x)`
+scaled that way has a slope near 3 at the origin, applying ~9.6dB of gain and
+bending visibly long before full scale, so a mixed signal peaking at 0.3 came
+back at 0.9 and there was no `drive` value at which the stage was clean. Unity
+slope makes the curve tangent to the identity at zero, so quiet signal passes
+untouched and `drive` alone decides how much reaches the bend. The cost is that
+each character has its own output level at full drive (a wavefolder ends up
+quieter than a clipper — true of real ones), which is what `level` is for.
+
+Four characters: `soft` (tanh), `hard` (clipped identity — the most transparent
+until driven), `fold` (a wavefolder; the curve turns around past its peak, so
+louder input gets a *different* shape rather than a flatter one), `tape`
+(asymmetric, adding even harmonics; the constant subtraction removes the DC
+offset the asymmetry introduces without rebalancing the halves). The `character`
+setter validates before assigning, per the rule `RibbitPatternVariator`'s
+`pack=` learned: a set that throws must leave the object as it found it.
+
+## `processors/tilt.js` — `RibbitTilt extends RibbitProcessor`
+
+A low shelf and a high shelf in series, sharing a pivot frequency and moving in
+opposite directions from one `tone` control (±12dB, fixed — a second control
+for "how much of the one control" is one nobody moves). No crossfade: an EQ
+blended with its dry signal is just a weaker EQ, and `tone=0` is already flat.
+
+Both filters' `gain` and `frequency` start at intrinsic zero and are driven
+entirely by two `RibbitParamSources` params connected in — `tone` through a
+`+12` gain into the high shelf and a `-12` gain into the low shelf, `pivot`
+unscaled into both frequencies. This is the same technique as `createCrossfade`
+and for the same reason: `onSet` can't keep a *ramp* moving more than one node.
+
+## `processors/limiter.js` — `RibbitLimiter extends RibbitProcessor`
+
+`boostGain → DynamicsCompressorNode` at ratio 20, knee 0, attack 1ms. Ratio,
+knee and attack are fixed and unexposed — a limiter with those adjustable is a
+compressor, and pointing at `compressor` beats offering the same controls
+twice. `boost` is the half that matters: a limiter alone only makes things
+quieter, and the boost underneath turns "nothing clips" into "loud and even".
+No crossfade, since a limiter you can blend past isn't one.
+
+Documented honestly as a fast compressor rather than a lookahead brickwall —
+Web Audio has no lookahead, so a fast enough transient can still exceed the
+ceiling, which is why `ceiling` defaults to `-1` rather than `0`.
+
+## `processors/goodenizer.js` — `RibbitGoodenizer extends RibbitProcessor`
+
+The only **composite** in the engine: it constructs one each of the four
+processors above, chains them `compress → saturate → tilt → limit`, wraps the
+lot in its own `createCrossfade`, and republishes the children's *actual*
+`RibbitParam` and option objects under its own `params`/`options`. Not a fifth
+implementation — `/glue threshold=` and a standalone `/compressor threshold=`
+are the same object, so they cannot drift.
+
+Children are built with `new` rather than `ribbit.createProcessor`, so they're
+never registered, never addressable, and never in an insert chain. Everything
+generic then works with no extra code, because it all reads `params`/`options`:
+help text, ramping, `at=`, `/patch` destinations, and session round-tripping
+(its constructor accepts back every option it republishes, which is what
+`session.js`'s `createProcessor(type, { name, ...options })` requires).
+
+Stage order is the argument the class makes. Compression first so the saturator
+sees a level that barely moves — that's what keeps distortion character
+consistent as the music gets busier, which is most of what "evenly mixed"
+means. Tilt after the saturator, to voice what came out rather than what went
+in. Limiter last, since anything after it could undo it.
+
+`drive` defaults to **1**, i.e. the saturation stage present but clean:
+compression, tilt and limiting make a mix more like itself, while saturation
+makes it something else, and a processor that alters timbre by default isn't
+one to leave on every session. Deliberately *not* republished: the children's
+`mix`, the saturator's `level`, the limiter's `boost` — each would be a second
+way to set the same balance. `describeState()` prints both the compressor's and
+the limiter's reduction; `dispose()` overrides the base to tear down all four
+children.
 
 ## `modulator.js` — `RibbitModulator` (base)
 
@@ -713,8 +1019,12 @@ conditional draw mid-sequence changes every take after it.
 `RibbitPatch`: one continuous "patch cable" — connects a source object's
 `.output` (a modulator, but also a track/master's post-fader signal or a
 processor's post-effect signal — anything with an `.output`) into a
-destination `AudioParam`, through its own `depthGain` (attenuator) node —
-`sourceObject.output → depthGain → destParam`. `depth` lives on the patch,
+destination param, through its own `depthGain` (attenuator) node —
+`sourceObject.output → depthGain → destParam.audioParam`. `destParam` is the
+`RibbitParam`, not its bare `AudioParam`, so the cable can both drive it and
+*announce itself* to it (`attachPatch`/`detachPatch`) — which is what lets a
+param that gets read in JS rather than heard know it's modulated at all, and
+build its `AnalyserNode` tap lazily. `depth` lives on the patch,
 not either endpoint, specifically so the same source can drive several
 destinations at different amounts, and `params.depth` (an `RibbitParam`
 wrapping `depthGain.gain`) makes it rampable the exact same way a processor
@@ -996,7 +1306,11 @@ instance rather than holding any state of their own:
   (decoded) from/to values, and `rebuildAutomation` re-resolves the param
   by name and re-encodes on load/recall — an event built in code against a
   bare `AudioParam` (no `paramKey`) is skipped, and a rebuilt `once` event
-  fires once more.
+  fires once more. Both resolve through `addressableParams()`, not
+  `object.params`, so automation targeting a track's **synth** param
+  round-trips; resolving it the narrow way would have silently dropped
+  exactly those events on save — the worst kind of data loss, the kind you
+  only notice on reload.
 - `assertKnownTypes(nllc, snapshot)` (private) — checks every `.type` in a
   snapshot against the live registries and throws listing all unknown ones
   at once. Both rebuild paths below call it **before their first mutation**,

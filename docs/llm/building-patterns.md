@@ -85,9 +85,10 @@ GET /patterns/manifest.json
 { "<pack>": ["<pack>/<name>.json", ...] }
 ```
 
-Paths relative to the `/patterns/` prefix. Same shape as `percsampler`'s
-`/samples/manifest.json` on purpose — one rule, not two. Difference: pack names
-are **not** fixed (a pack is just a folder), so dropping in
+Paths relative to the `/patterns/` prefix. Same shape as the sample readers'
+`/samples/manifest.json` on purpose — one rule, not two. Remaining difference:
+*nothing* here is fixed (a pack is just a folder), where the samples manifest
+always publishes the four drum categories. Dropping in
 `static/patterns/<pack>/<name>.json` and refreshing is the whole workflow.
 Reference: `nllc/src/routes/patterns/manifest.json/+server.js`.
 Manifests and parsed patterns are cached per URL as **both** promise and

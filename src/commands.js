@@ -1,6 +1,7 @@
 import { scheduleRamp, setInstant, scheduleAt, RibbitAutomationEvent } from "./automation.js";
 import { RibbitEvent } from "./event.js";
 import { parseDegreeList } from "./harmony.js";
+import { addressableParams } from "./param.js";
 import { RESERVED_NAMES } from "./ribbit.js";
 import { snapshotSession, sessionToJSON, loadSession, applySnapshot } from "./session.js";
 
@@ -248,13 +249,13 @@ function formatParamLine(key, param) {
 };
 
 // The options counterpart to formatParamLine — a choices-carrying option
-// (waveform) lists them; anything else just notes it can't be ramped, the
-// one behavioral difference from a param a reader needs to know. It can
-// still be deferred with at= (see applyOptions), so the note is specifically
-// "not rampable" rather than the broader "not schedulable" it used to imply.
+// (waveform) lists them; anything else just prints its value. The
+// "not rampable, but at= works" note this used to carry on every line was
+// the section heading's job all along ("options (settable, not rampable)"),
+// repeated once per option; a granular listing spent five lines saying it.
 function formatOptionLine(key, option) {
-    const note = option.choices ? ` (choices: ${option.choices.join(", ")})` : " (not rampable, but at= works)";
-    return `  ${key}=${formatOptionValue(option.get())}${note}`;
+    const choices = option.choices ? ` (choices: ${option.choices.join(", ")})` : "";
+    return `  ${key}=${formatOptionValue(option.get())}${choices}`;
 };
 
 // The one place that knows how to get/set/ramp/defer a param (an RibbitParam —
@@ -328,7 +329,7 @@ function applyOptions(ribbit, object, input, timing, exclude = new Set()) {
         if (!option) continue;
 
         if (isRamp(spec)) {
-            results.push(`${key} can't be ramped (not an audio param) — use ${key}=<value>, optionally with at=beat|cycle`);
+            results.push(`${key} can't be ramped — use ${key}=<value>`);
             continue;
         }
         if (option.choices && !option.choices.includes(spec)) {
@@ -453,12 +454,17 @@ function channelSummary(channel) {
     const sends = channel.sends.length
         ? channel.sends.map((s) => `${s.id}:${s.destName}(${s.params.gain.get().toFixed(2)})`).join(", ")
         : "none";
-    // For now the source can't be introspected further, but surface what it
-    // is so this is a natural place for that control to grow into.
     const synth = channel.source
         ? ` synth=${channel.source.name}("${channel.source.llm_summary}")${channel.source.active ? "" : " (stopped)"}`
         : "";
-    return `${channel.name} — ${gain} ${pan} inserts=[${inserts}] sends=[${sends}]${synth}`;
+    // The same optional duck-typed hook paramObjectSummary uses (see there),
+    // reached through the track rather than directly since a synth isn't
+    // separately addressable. RibbitGranular is the first synth to implement
+    // it, and needs to: it picks its source recording at random, so without
+    // this the only way to know what a track is actually playing is to read
+    // the session file.
+    const state = channel.source?.describeState?.();
+    return `${channel.name} — ${gain} ${pan} inserts=[${inserts}] sends=[${sends}]${synth}${state ? ` ${state}` : ""}`;
 };
 
 // Full reference text for `/track_1 help` (also master/any bus) — everything
@@ -481,9 +487,15 @@ function channelHelp(ribbit, channel) {
     if (channel.source) {
         const synthParams = Object.entries(channel.source.params);
         const synthOptions = Object.entries(channel.source.options);
-        if (synthParams.length || synthOptions.length) {
-            lines.push("", `synth params/options (${channel.source.name}):`);
+        // Two headings rather than one, because the per-option "not
+        // rampable" note that used to distinguish them line by line is gone
+        // — the split now carries that, once.
+        if (synthParams.length) {
+            lines.push("", `synth params (${channel.source.name}):`);
             for (const [key, param] of synthParams) lines.push(formatParamLine(key, param));
+        }
+        if (synthOptions.length) {
+            lines.push("", `synth options (${channel.source.name}, settable, not rampable):`);
             for (const [key, option] of synthOptions) lines.push(formatOptionLine(key, option));
         }
     }
@@ -501,7 +513,7 @@ function channelHelp(ribbit, channel) {
     } else {
         lines.push("  (no synth here — add_event/clear_events/start/stop/synth= are no-ops on master/buses)");
     }
-    lines.push("  automate=<param> to= [from= beat= duration= curve= once]   add loop-position automation on gain/pan (beats, repeats every loop unless once)");
+    lines.push(`  automate=<param> to= [from= beat= duration= curve= once]   add loop-position automation on gain/pan${channel.source ? " or any of this synth's params" : ""} (beats, repeats every loop unless once)`);
     lines.push("  automations / remove_automation=<n> / clear_automation     list (with indices) / remove one / remove all");
     lines.push(`  add_processor=<type>             insert an effect at the end of the chain (${ribbit.processorTypes.join(", ")})`);
     lines.push("  remove_processor=<id>            remove an insert by id");
@@ -727,13 +739,16 @@ function channelCommand(ribbit, channel, params) {
         }
     }
 
-    // Loop-position automation on this channel's own gain/pan — see
-    // addAutomationCommand/listAutomation above; the same surface every
-    // processor/modulator gets via paramObjectCommand.
+    // Loop-position automation on this channel's gain/pan *and* its synth's
+    // own params — see addAutomationCommand/listAutomation above; the same
+    // surface every processor/modulator gets via paramObjectCommand.
+    // addressableParams is what carries it through to the synth: a one-off
+    // ramp (/pad position=0.9 8b) and a repeating one (/pad automate=position)
+    // should never have disagreed about what a track's params are.
     if ("automate" in params) {
-        results.push(...addAutomationCommand(ribbit, channel, channel.params, params, timing));
+        results.push(...addAutomationCommand(ribbit, channel, addressableParams(channel), params, timing));
     }
-    if (params.automations) results.push(listAutomation(channel, channel.params));
+    if (params.automations) results.push(listAutomation(channel, addressableParams(channel)));
     if ("remove_automation" in params) results.push(removeAutomationCommand(ribbit, channel, params.remove_automation, timing));
     if (params.clear_automation) {
         results.push(runAt(ribbit, timing, "automation will be cleared", () => {
@@ -938,6 +953,12 @@ function paramObjectCommand(ribbit, object, params, removeSelf) {
         }
     }
 
+    // Nothing to report means nothing was actually asked for — a bare
+    // `/lfo1 at=cycle` handles `at` and then finds no set, no option, no
+    // automate to defer. Answer it as the query it effectively is, the same
+    // way channelCommand falls back to its summary, instead of printing a
+    // bare "lfo1: ".
+    if (!results.length) return paramObjectSummary(object);
     return `${object.name}: ${results.join(", ")}`;
 };
 
@@ -1102,7 +1123,7 @@ function resolveValueCandidates(ribbit, commandName, resolvedObject, key) {
     if (key === "remove_processor" && resolvedObject?.processors) return resolvedObject.processors.map((p) => p.id);
     if ((key === "remove_send" || key === "send") && resolvedObject?.sends) return resolvedObject.sends.map((s) => s.id);
     if (key === "curve") return AUTOMATION_CURVES;
-    if (key === "automate" && resolvedObject?.params) return Object.keys(resolvedObject.params);
+    if (key === "automate" && resolvedObject?.params) return Object.keys(addressableParams(resolvedObject));
     if (key === "remove_event" && resolvedObject?.source) return resolvedObject.source.events.map((_, i) => String(i));
     if (key === "remove_automation" && resolvedObject?.automation) return resolvedObject.automation.map((_, i) => String(i));
 
@@ -1355,7 +1376,7 @@ export function createCommandRouter(ribbit) {
             // before runAt so a malformed scale is still a command error.
             if ("root" in params) {
                 if (isRamp(params.root)) {
-                    results.push("root can't be ramped — use root=<midi note>, optionally with at=beat|cycle");
+                    results.push("root can't be ramped — use root=<midi note>");
                 } else {
                     const root = toNumber(params.root, "root");
                     results.push(runAt(ribbit, timing, `root=${root}`, () => {
@@ -1366,7 +1387,7 @@ export function createCommandRouter(ribbit) {
             }
             if ("scale" in params) {
                 if (isRamp(params.scale)) {
-                    results.push("scale can't be ramped — use scale=<comma-separated degrees>, optionally with at=beat|cycle");
+                    results.push("scale can't be ramped — use scale=<comma-separated degrees>");
                 } else {
                     const scale = parseDegreeList(params.scale);
                     results.push(runAt(ribbit, timing, `scale=${scale.join(",")}`, () => {

@@ -245,6 +245,13 @@ params for values read fresh inside `generateEvents`. Both `markovpercs` and
 `patternvariator` split exactly this way — `seed`/`variation`/`density` are
 options, `velocity`/`swing` are params.
 
+Read those params with **`getModulated()`** rather than `get()` inside
+`generateEvents`. `get()` returns the intrinsic value and is blind to
+patches; `getModulated()` sees them, which is what makes
+`/patch source=lfo1 dest=rhy.dropout` thin and fill a pattern over the LFO's
+cycle. Keep `get()` for anything that displays or saves the value — see
+`param.js` in [source-overview.md](source-overview.md#paramjs).
+
 ## Removing one later
 
 See [removing-a-type.md](removing-a-type.md) — the undo is not just these

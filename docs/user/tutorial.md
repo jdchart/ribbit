@@ -364,6 +364,121 @@ somewhere else entirely instead of adding another destination:
 
 See [commands.md](commands.md#buses-and-sends) for the full reference.
 
+## Making it sound good
+
+`reverb` and `delay` add something *beside* your signal. The other five
+processors act *on* it — they're for making a mix louder, steadier and better
+balanced rather than making it different.
+
+The quickest version is one command:
+
+```
+/master add_processor=goodenizer
+```
+
+That's a compressor, a saturator, a tilt EQ and a limiter chained in that
+order. Ask it what it's doing:
+
+```
+/goodenizer
+```
+```
+goodenizer (p1): The whole chain in one box: ... [threshold=-20.000, ratio=4.000,
+attack=0.010, release=0.120, makeup=1.400, drive=1.000, tone=0.150, pivot=900.000,
+ceiling=-1.000, mix=1.000, character=soft, oversample=2x] comp -4.2 dB, limit -0.7 dB
+```
+
+That trailing `comp -4.2 dB, limit -0.7 dB` is live gain reduction — how hard
+each end of the chain is currently working. It's the one thing about a
+compressor no parameter can tell you, because it depends entirely on what's
+going through it.
+
+`mix` is a true crossfade, not a wet level, so it's an instant A/B:
+
+```
+/goodenizer mix=0        the mix with nothing on it
+/goodenizer mix=1 2      fade the treatment back in over two seconds
+```
+
+It ships polite. `drive` — the saturation stage — defaults to `1`, which is
+clean. Compression, tilt and limiting make a mix more like itself; saturation
+makes it into something else, so it waits to be asked:
+
+```
+/goodenizer drive=9
+/goodenizer character=fold
+/goodenizer drive=1
+```
+
+### The four on their own
+
+Use them individually when you want one thing rather than the lot. Each is a
+normal processor: it goes on any channel's insert chain, its params ramp, and
+it's addressed by its type name.
+
+**`tilt`** is the one to try first, because most of what people mean by a mix
+sounding wrong is a broad tonal tilt. One control trades low end for high:
+
+```
+/master add_processor=tilt
+/tilt tone=-0.5 8b       slowly pull everything darker and fuller
+/tilt tone=0.4 4b        and back up bright
+```
+
+**`saturator`** is drive into one of four curves — `soft`, `hard`, `fold`,
+`tape`. `drive` is the amount, `character` the flavour:
+
+```
+/track_1 add_processor=saturator
+/saturator drive=14 character=tape
+/saturator drive=25 character=fold     a wavefolder; nothing like the others
+/saturator mix=0.4                     parallel distortion
+```
+
+**`limiter`** is `boost` into a ceiling. The boost is what makes things loud;
+the ceiling stops it running away:
+
+```
+/master add_processor=limiter
+/limiter boost=2.5 ceiling=-1
+```
+
+**`compressor`** has the usual controls, plus a `mix` — and that `mix` is what
+makes **parallel compression** possible. Send drums to a bus, squash what
+arrives there completely, and blend it back under the untouched originals:
+
+```
+/add_bus name=smash
+/smash add_processor=compressor
+/compressor threshold=-38 ratio=12 attack=0.002 makeup=3.5
+/drums add_send=smash send_gain=0.6
+/smash gain=0            then bring it up under the dry drums
+/smash gain=0.5 4b
+```
+
+That adds weight without flattening dynamics, because the dry path is
+untouched — a very different result from simply compressing the drums harder.
+
+### Pumping
+
+Every one of those params is a real param, which means it's a `/patch`
+destination. Patching an LFO into a compressor's *threshold* moves the
+threshold in time, so the whole mix breathes with the beat:
+
+```
+/add_modulator type=lfo freq=0.5 name=pump
+/patch source=pump dest=goodenizer.threshold depth=15
+```
+
+Raise `depth` for more. This is the sidechain-pumping trick without needing a
+sidechain input, and it falls out of the engine's ordinary patching rather
+than being a feature anyone built.
+
+Every session that ships with ribbit runs a `goodenizer` on master named
+`glue`, so `/glue mix=0` works in any of them. The `goodenizer-demo` session
+is a guided tour of all five. Full reference:
+[objects.md](objects.md#processors-add_processor-on-any-channel).
+
 ## Modulators and patching
 
 So far every parameter change has been you typing a value or a ramp. A
@@ -674,7 +789,7 @@ different pattern in the same pack.
 ### Chords and melodies
 
 The same modulator plays pitched material, and `karplus` — a plucked string,
-and the only polyphonic synth — is what to point it at:
+and one of the two polyphonic synths — is what to point it at:
 
 ```
 /add_track name=keys synth=karplus
@@ -728,6 +843,135 @@ selectable. Full format reference, including chords and melodies:
 
 `/code-editor/pattern-drums` and `/code-editor/pattern-chords` are worked
 versions of both halves of this.
+
+## Pads out of noise: the granular synth
+
+Everything so far has made sound from oscillators, drum hits or plucked
+strings. `granular` makes it from **a recording of something else entirely** —
+rain, a river, birds, glass — by chopping it into dozens of overlapping
+fragments per note:
+
+```
+/add_track name=pad synth=granular
+/pad add_event beat=0 degree=0 duration=4
+/start
+```
+
+That's a pad, out of a field recording that has no pitch and no pulse. Ask the
+track what it landed on:
+
+```
+/pad
+```
+
+It picked a recording at random from `static/samples/foley/`, the same way
+`percsampler` picks a kit, and tells you which one and how long it is. Try
+another:
+
+```
+/pad sample=random
+```
+
+### The two halves of a grain cloud
+
+A note here is an **envelope** wrapped around a **cloud**, and they're
+controlled separately. That split is worth feeling directly. First the
+envelope — this is what makes it a pad rather than a sample:
+
+```
+/pad attack=4         slow swell
+/pad release=6        long tail
+```
+
+Now the cloud inside it. Each grain is a short slice read from a playhead
+somewhere in the recording:
+
+```
+/pad density=8        few, separate grains — you can hear them individually
+/pad density=60       a solid wash
+/pad grain_size=0.02  tiny grains: the grain rate becomes a pitch of its own
+/pad grain_size=0.8   long grains: you hear the recording's own movement
+```
+
+`position` is where in the recording the playhead sits, and it's the control
+worth putting your hand on. Ramp it and the pad walks through the material:
+
+```
+/pad position=0.9 16b
+```
+
+Three more shape the scatter: `spray` (how far grains wander either side of
+the playhead — `0` is a frozen, almost tonal drone, `3` smears a whole phrase
+into one chord), `pitch_spread` (a fraction of a semitone is chorus, several
+is a cloud that disagrees with itself), and `drift` (how fast the playhead
+moves *while a note is held* — the way to keep a long note evolving).
+
+```
+/pad spray=0 4b       freeze onto one instant
+/pad spray=3 8b       and smear back out
+/pad drift=0.5        let each held note travel
+```
+
+### Chords from unpitched material
+
+`granular` is polyphonic, so a chord is several clouds at once — and the
+`ambientchords` pack exists to drive it:
+
+```
+/add_modulator type=patternvariator name=bloom pack=ambientchords pattern=slow-bloom
+/patch source=bloom dest=pad.notes
+```
+
+Transposing a recording is a **tape-speed** gesture: pitch and content move
+together, so a low note doesn't just sound lower, it reads slower through the
+material. `root` says which note plays it at natural speed, and moving it
+shifts the whole part's character:
+
+```
+/pad root=72          everything an octave down, slower and deeper
+/pad root=48          twice as fast, an octave up
+```
+
+Two last things worth knowing. Recordings are **gain-matched on load** — the
+shipped foley folder spans about 30dB, so without it every roll of the dice
+would need a new fader setting; the track summary shows the match (`x20.0`).
+And `density` is the CPU knob, because every grain is three audio nodes and a
+note schedules its whole cloud in advance. 20–40 is a pad; 200 is a stress
+test.
+
+`/code-editor/granular-pad` is the worked version: three granular tracks — a
+watery pad, reversed rain, and a shimmer an octave up — over a long reverb.
+
+## Pads through a tape machine: `tapepad`
+
+`granular` gets its character from a recording. `tapepad` gets it from the
+*medium*: an ordinary stack of detuned oscillators, then a tape transport that
+bends the pitch and a tape stage that saturates, crushes and hisses.
+
+```
+/add_track name=pad synth=tapepad
+/pad add_event beat=0 degree=0 duration=6
+/pad add_event beat=0 degree=7 duration=6
+/pad wow=60 8b                  # warp the tape over 8 beats
+/pad bits=5                     # and print it to something cheap
+```
+
+Note what `wow=60 8b` does that no synth param you've met so far can: it warps
+a chord **that is already sounding**. Every other synth param here —
+`granular`'s `position`, `karplus`'s `brightness` — is read once when a note
+is scheduled, so a ramp on it only reaches the *next* note. `tapepad`'s
+`wow`, `wow_rate`, `flutter`, `hiss` and `sat` live on shared nodes that run
+continuously, so they behave like a channel's `gain` instead. Its other six
+(`cutoff`, `detune`, `pan_spread`, `sub`, `attack`, `release`) follow the
+usual per-note rule. Nothing in the command surface distinguishes them; the
+tables in [objects.md](objects.md#tapepad--ribbittapepad) mark which is which.
+
+The transport is one machine for the whole synth, not one per voice — so the
+chord bends *together*, the way a warped reel sounds, rather than each note
+drifting somewhere different (which is a chorus pedal).
+
+`/code-editor/ambient-tape` is the worked version: three tapepad layers over
+the `ambientchords` pack, plus a dusty beat.
 
 ## The mixer
 

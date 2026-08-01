@@ -312,9 +312,9 @@ export class RibbitEuclidPercs extends RibbitModulator {
         if (this.steps === 0) return [];
 
         const stride = this._stride();
-        const velocity = this.params.velocity.get();
-        const swing = this.params.swing.get();
-        const dropout = this.params.dropout.get();
+        const velocity = this.params.velocity.getModulated();
+        const swing = this.params.swing.getModulated();
+        const dropout = this.params.dropout.getModulated();
         const events = [];
 
         // 1e-9 absorbs float error in beat arithmetic, so a step landing

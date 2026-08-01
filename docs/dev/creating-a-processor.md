@@ -81,12 +81,25 @@ Points worth noting, all copied from `processors/reverb.js`/`processors/delay.js
 
 - **`this.input`/`this.output` are provided by the base class** — wire your DSP
   chain between them; never create your own input/output nodes.
-- **Decide dry/wet at construction, not as an afterthought.** `RibbitReverb` and
-  `RibbitDelay` both always pass dry signal straight through (`input.connect(output)`)
-  in parallel with the wet path, so `wet=0` doesn't silence the channel — match
-  this convention unless a processor is deliberately not supposed to have a dry
-  path (e.g. a pure gain/distortion insert might reasonably *not* keep a separate
-  dry path, since the wet path *is* the whole signal).
+- **Decide dry/wet at construction, and pick the right *kind*.** There are two,
+  and choosing wrong is a real bug rather than a style preference:
+  - **Dry at unity, wet added on top** (`input.connect(output)` in parallel with
+    the wet path) — what `RibbitReverb` and `RibbitDelay` do. Right for an
+    *effect*: something you're layering beside the signal. `wet=0` means off.
+  - **A true crossfade**, dry = 1 - mix — `RibbitProcessor.createCrossfade(mix)`,
+    used by `RibbitCompressor`, `RibbitSaturator` and `RibbitGoodenizer`. Right
+    for anything that *acts on* the signal. A compressor built the first way
+    could never tame a peak, because the untouched peak would sail through the
+    dry path beside it.
+
+  `createCrossfade` returns `{ param, dryGain, wetGain }` with the dry side
+  already wired; connect your wet chain into `wetGain` and put `param` into
+  `this.params` as `mix`. It also gives parallel processing for free — `mix=0.5`
+  is New York compression.
+
+  A processor may reasonably have *neither* (`RibbitTilt`, `RibbitLimiter`): an
+  EQ blended with its dry signal is just a weaker EQ, and a limiter you can
+  blend past isn't a limiter.
 - **`this.params` is the command-router's introspection surface** —
   `{ paramName: RibbitParam }` (see `param.js`). `commands.js`'s `applyParams()`
   calls `.set(value)`/reads `.audioParam` for `/name param=value` (and ramps/
@@ -105,14 +118,38 @@ Points worth noting, all copied from `processors/reverb.js`/`processors/delay.js
   ramping/`at=` deferral will animate) as the wrapped `AudioParam`, and
   override the plain instant-set path with `onSet`. See `processors/delay.js` for the
   real example.
-- **A param that isn't backed by a real `AudioParam` at all** (`amount`
-  above, whose "value" is really a `Float32Array` curve that has to be
-  rebuilt from scratch on every change) doesn't fit `RibbitParam` well — there's
-  no real `AudioParam` to ramp, and forcing one in just to satisfy the
-  constructor would be misleading. It's fine to leave a param like this as a
-  constructor-only option (not runtime-adjustable at all) until/unless
-  `RibbitParam` grows a mode for non-`AudioParam`-backed values; don't invent an
-  awkward fake `AudioParam` to route around this.
+- **A param that isn't backed by a real `AudioParam` at all** splits into two
+  cases, and they get opposite answers:
+  - **There's no continuous value to sweep** (`amount` above, whose "value" is
+    really a `Float32Array` curve rebuilt from scratch on every change; or
+    `RibbitSaturator`'s `character`). Declare it as an **option**. Don't invent
+    a fake `AudioParam` — a half-applied waveshaper curve is meaningless, so
+    there's nothing a ramp could even mean. Note that non-rampable does *not*
+    mean non-schedulable: `/saturator character=fold at=cycle` works, like every
+    other mutating command.
+  - **There is a value worth sweeping, but nothing in the audio graph to hang it
+    on.** Use `RibbitParamSources` (`src/param.js`), which invents an
+    `AudioParam` from a `ConstantSourceNode`'s `.offset` and handles the
+    silent-sink quirk that would otherwise make its scheduled automation
+    unreadable. This is what `createCrossfade` uses internally, and what
+    `RibbitTilt`'s `tone`/`pivot` and several modulators' params are built from.
+    Call `this._paramSources.dispose()` from your own `dispose()`.
+- **A param that must *ramp* across several nodes needs the `ConstantSourceNode`
+  route, not `onSet`.** `onSet` only overrides the instant-set path, so a ramp
+  animates the primary node and strands the others — that's the standing
+  `RibbitDelay` `time`/`feedback` limitation. Connecting one
+  `ConstantSourceNode`'s offset into several `AudioParam`s instead (optionally
+  through scaling/inverting gains) makes a single param drive all of them
+  through instant sets, ramps, `at=` deferral and `/patch` alike, because
+  `AudioParam` connections *sum* onto the intrinsic value. `RibbitTilt` drives
+  two shelf gains in opposite directions this way; `createCrossfade` drives two
+  gains for the same reason.
+- **Implement `dispose()` if you own running nodes.** It's duck-typed, called by
+  `Ribbit.removeProcessor` and `Ribbit.dispose`. The base implementation
+  disposes `this._paramSources`; override and call `super.dispose()` if you own
+  more (`RibbitGoodenizer` disposes its four children). This matters because a
+  `ConstantSourceNode` reaches `audioContext.destination` through its own muted
+  sink, so unwiring the processor from a channel's chain never stops it.
 - **`active` (routing bypass) is handled entirely by `RibbitChannel._rewireChain`** —
   you don't need to check `this.active` yourself inside the processor; when
   bypassed, the channel simply doesn't connect your `input`/`output` into the
@@ -150,6 +187,11 @@ import { RibbitDistortion } from "./processors/distortion";
 const PROCESSOR_TYPES = {
     reverb: RibbitReverb,
     delay: RibbitDelay,
+    compressor: RibbitCompressor,
+    saturator: RibbitSaturator,
+    tilt: RibbitTilt,
+    limiter: RibbitLimiter,
+    goodenizer: RibbitGoodenizer,
     distortion: RibbitDistortion,   // add this
 };
 ```
@@ -158,6 +200,48 @@ const PROCESSOR_TYPES = {
 no other code changes needed, since `createProcessor` and `processorCommand`/
 `applyParams` both work generically off `PROCESSOR_TYPES` and `params`.
 
+## Optional: composing existing processors
+
+A processor doesn't have to contain new DSP. `RibbitGoodenizer` is a
+**composite**: it constructs one `RibbitCompressor`, `RibbitSaturator`,
+`RibbitTilt` and `RibbitLimiter`, chains their `input`/`output`s, and
+republishes their *actual* `RibbitParam` and option objects under its own
+`params`/`options`:
+
+```js
+this.compressor = new RibbitCompressor(audioContext, { name: `${name}:comp`, threshold, ratio });
+this.saturator  = new RibbitSaturator(audioContext, { name: `${name}:sat`, drive, character });
+
+this.input.connect(this.compressor.input);
+this.compressor.output.connect(this.saturator.input);
+// ...
+
+this.params = {
+    threshold: this.compressor.params.threshold,   // the same object, not a copy
+    drive: this.saturator.params.drive,
+};
+this.options = { character: this.saturator.options.character };
+```
+
+Three things make this work cleanly, and they're the rules to follow if you
+build another one:
+
+- **Construct children directly, not via `ribbit.createProcessor`.** They must
+  not be registered, addressable, or in anyone's insert chain — they're
+  node-graph builders that happen to be shaped like processors.
+- **Share the objects, don't wrap them.** Because `params.threshold` *is* the
+  child's `RibbitParam`, `/goodenizer threshold=` and a standalone
+  `/compressor threshold=` run identical code against the same `AudioParam` and
+  cannot drift. Everything generic — help text, ramping, `at=`, `/patch`,
+  session round-tripping via `getOptions()` — then works with no extra code.
+- **Your constructor must accept back every option you republish**, since
+  `session.js` reconstructs with `createProcessor(type, { name, ...options })`.
+- **Override `dispose()`** and tear down the children (see above).
+
+Be deliberate about what you *don't* republish. The goodenizer omits its
+children's `mix`, the saturator's `level` and the limiter's `boost` — each
+would be a second way to set the same balance. One knob per job; the atoms
+exist for the rest.
 
 ## Removing one later
 

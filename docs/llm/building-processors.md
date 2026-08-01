@@ -54,14 +54,44 @@ export class RibbitMyProcessor extends RibbitProcessor {
 - Single real `AudioParam` (most common): `new RibbitParam(this.someGain.gain)`.
 - Needs a value transform (rare outside channel gain's taper): `{ decode, encode }`.
 - Needs clamping: `{ min, max }`.
-- Needs to fan one value out across more than one node (e.g. `RibbitDelay.time`
-  writing both delayL/delayR): `{ onSet: (value) => { /* write to both */ } }`
-  — pass whichever node is "primary" as the constructor's `audioParam` (that's
-  what ramping/deferred `at=` animates); `onSet` only overrides the plain
-  instant-set path.
-- Not backed by any real `AudioParam` at all (e.g. a value that rebuilds a
-  waveshaper curve): don't force it into `RibbitParam` — leave it as a
-  constructor-only option instead.
+- Needs to fan one value out across more than one node **on instant set only**
+  (e.g. `RibbitDelay.time` writing both delayL/delayR):
+  `{ onSet: (value) => { /* write to both */ } }` — pass whichever node is
+  "primary" as the constructor's `audioParam` (that's what ramping/deferred
+  `at=` animates); `onSet` only overrides the plain instant-set path, which is
+  why delay's `time`/`feedback` ramp only one node.
+- Needs to fan out across several nodes **including through ramps** — connect
+  one `ConstantSourceNode`'s `.offset` (via `RibbitParamSources`) into every
+  target `AudioParam`, optionally through scaling/inverting gains. Connections
+  *sum* onto the intrinsic value, so one param drives all of them through
+  sets, ramps, `at=` and `/patch`. See `RibbitTilt` (two shelf gains, inverted)
+  and `RibbitProcessor.createCrossfade` (two gains, inverted).
+- Not backed by any real `AudioParam` and with nothing to sweep (a value that
+  rebuilds a waveshaper curve): make it an **option**, not a param.
+- Not backed by any real `AudioParam` but genuinely sweepable: use
+  `RibbitParamSources` (`src/param.js`), and dispose it.
+
+**Dry/wet has two shapes; picking wrong is a bug.** `reverb`/`delay` keep dry at
+unity and *add* wet — right for an effect. Anything that *acts on* the signal
+(compressor, saturator) needs `RibbitProcessor.createCrossfade(mix)`, a true
+crossfade with dry = 1 - mix, or its dry path carries exactly the peaks it was
+inserted to control. Returns `{ param, dryGain, wetGain }` with dry pre-wired;
+connect your wet chain into `wetGain`. Some processors want neither (`tilt`,
+`limiter`).
+
+**`dispose()`** is duck-typed and called by `removeProcessor`/`Ribbit.dispose`.
+The base disposes `this._paramSources`; override + `super.dispose()` if you own
+more. Required if you use `createCrossfade` or `RibbitParamSources`, since those
+`ConstantSourceNode`s reach `destination` through their own muted sinks and
+aren't stopped by unwiring the processor.
+
+**Composites are allowed.** `RibbitGoodenizer` builds four other processors
+directly (never via `createProcessor`, so they stay unregistered and
+unaddressable), chains their `input`/`output`s, and republishes their *actual*
+`RibbitParam`/option objects — the same objects, so nothing can drift. Its
+constructor must accept back every option it republishes (session.js
+reconstructs via `createProcessor(type, { name, ...options })`), and its
+`dispose()` tears down the children.
 
 Register it in `ribbit.js`'s `PROCESSOR_TYPES` map (`import { RibbitMyProcessor }
 from "./processors/myprocessor"; ... { myprocessor: RibbitMyProcessor }`) — the

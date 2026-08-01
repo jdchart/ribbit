@@ -111,9 +111,9 @@ export class RibbitKarplus extends RibbitSynth {
         const midi = event.degree !== undefined ? resolveDegree(this.harmony, event.degree) : event.pitch;
         const freq = midiToFreq(midi);
 
-        const damping = this.params.damping.get();
-        const decaySeconds = this.params.decay.get();
-        const brightness = this.params.brightness.get();
+        const damping = this.params.damping.getModulated();
+        const decaySeconds = this.params.decay.getModulated();
+        const brightness = this.params.brightness.getModulated();
 
         // The delay line is one wavelength long — that length *is* the pitch.
         // Floored at 2 samples so an absurdly high note degrades to noise

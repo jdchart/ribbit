@@ -1,5 +1,12 @@
 import { RibbitSynth } from "../synth.js";
 import { RibbitParamSources } from "../param.js";
+import {
+    SAMPLE_MANIFEST_URL,
+    fetchSampleManifest,
+    resolvedSampleManifest,
+    sampleName,
+    sampleUrl,
+} from "../samples.js";
 
 // The categories a percussion kit is built from, in slot order. This array is
 // the contract a rhythm generator codes against (see modulators/markovpercs.js):
@@ -8,24 +15,10 @@ import { RibbitParamSources } from "../param.js";
 // pattern any generator produces, so it's deliberately not configurable.
 export const PERC_CATEGORIES = ["kicks", "snares", "hats", "percs"];
 
-// Where the host publishes "what sample files exist, by category". A browser
-// can't list a directory over HTTP, so a randomly-chosen kit is only possible
-// if the host says what there is to choose from — see
-// nllc/src/routes/samples/manifest.json/+server.js for the reference
-// implementation. Shape: { kicks: ["kicks/a.wav", ...], snares: [...], ... },
-// each entry a path relative to the same "/samples/" prefix the .wav files
-// themselves are served under.
-const MANIFEST_URL = "/samples/manifest.json";
-
-// Derives a short display name from a sample path, e.g.
-// "kicks/CLAUDE - kick01.wav" -> "kick01". Mirrors sampler.js's sampleName,
-// with the leading category folder stripped too.
-function sampleName(filePath) {
-    return filePath
-        .replace(/^.*\//, "")
-        .replace(/^CLAUDE - /, "")
-        .replace(/\.\w+$/, "");
-};
+// Where the host publishes "what sample files exist, by folder", and the
+// naming/caching rules for reading it, all live in ../samples.js — shared with
+// `granular`, which picks its grain source from the same library. The four
+// categories below are the part of that manifest this synth cares about.
 
 // The category a sample path belongs to, or null for a path that isn't under
 // one of the four folders (an explicit `samples=` list is allowed to name
@@ -49,38 +42,6 @@ const RANDOMIZATION = {
     snares: { pan: false, speed: true },
     hats: { pan: true, speed: true },
     percs: { pan: true, speed: true },
-};
-
-// Cached per URL: the manifest describes the host's static sample folder,
-// which doesn't change while the page is open, and re-rolling a kit live
-// (samples=random, repeatedly, mid-set) shouldn't mean a network round trip
-// each time. Caching the *promise* rather than the result also collapses the
-// concurrent case — several percsampler tracks constructed together share one
-// request. A failure isn't cached: the entry is dropped so a later attempt
-// can retry.
-const manifestCache = new Map();
-
-// The same manifests again, but *resolved* rather than as promises. Awaiting
-// even an already-settled promise costs a microtask, which is long enough for
-// the console to have printed its confirmation line — so a re-roll would echo
-// the kit it just replaced and read as "nothing happened". Once a manifest is
-// in here, re-rolling is fully synchronous and the echo is honest.
-const resolvedManifests = new Map();
-
-function fetchManifest(url) {
-    if (!manifestCache.has(url)) {
-        manifestCache.set(url, (async () => {
-            const response = await fetch(url);
-            if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-            const manifest = await response.json();
-            resolvedManifests.set(url, manifest);
-            return manifest;
-        })().catch((error) => {
-            manifestCache.delete(url);
-            throw error;
-        }));
-    }
-    return manifestCache.get(url);
 };
 
 function pickRandom(candidates, count) {
@@ -113,7 +74,7 @@ export class RibbitPercSampler extends RibbitSynth {
         per_category = 4,
         samples = null,
         categories = null,
-        manifest_url = MANIFEST_URL,
+        manifest_url = SAMPLE_MANIFEST_URL,
         dynamics = 0.25,
         pan_spread = 0.4,
         speed_spread = 0.1,
@@ -318,7 +279,7 @@ export class RibbitPercSampler extends RibbitSynth {
     // nothing rather than queue up. A host serving no manifest gets an empty
     // kit and one console warning, not an exception out of a constructor.
     _randomize() {
-        const cached = resolvedManifests.get(this.manifestUrl);
+        const cached = resolvedSampleManifest(this.manifestUrl);
         if (cached) {
             this._setSamples(this._pickKit(cached));
             return;
@@ -328,7 +289,7 @@ export class RibbitPercSampler extends RibbitSynth {
         this._resolved = (async () => {
             let manifest;
             try {
-                manifest = await fetchManifest(this.manifestUrl);
+                manifest = await fetchSampleManifest(this.manifestUrl);
             } catch (error) {
                 console.warn(`${this.name}: couldn't read sample manifest at ${this.manifestUrl} — ${error.message}. Kit is empty; set samples=<list> to load files directly.`);
                 return;
@@ -350,10 +311,7 @@ export class RibbitPercSampler extends RibbitSynth {
         this.slots = samples.map((filePath) => ({
             name: filePath ? sampleName(filePath) : "(empty)",
             category: filePath ? sampleCategory(filePath) : null,
-            // Filenames contain spaces, so each path segment is encoded
-            // individually — encodeURIComponent on the whole path would eat
-            // the category separator too.
-            url: filePath ? `/samples/${filePath.split("/").map(encodeURIComponent).join("/")}` : null,
+            url: filePath ? sampleUrl(filePath) : null,
             buffer: null,
         }));
         this._loaded = this._loadAll();
@@ -398,7 +356,7 @@ export class RibbitPercSampler extends RibbitSynth {
         // pasted sixteen times. Floored well above 0 because a rate at or
         // below 0 either freezes the sample or throws.
         if (randomize.speed) {
-            const spread = this.params.speed_spread.get();
+            const spread = this.params.speed_spread.getModulated();
             if (spread > 0) {
                 source.playbackRate.value = Math.max(0.1, 1 + (Math.random() * 2 - 1) * spread);
             }
@@ -409,13 +367,13 @@ export class RibbitPercSampler extends RibbitSynth {
         // takes away from it, by a random amount up to `dynamics`. Since that
         // param is capped at 0.9 the quietest possible hit is a tenth of its
         // velocity — quiet, but never a dropped note.
-        const dynamics = this.params.dynamics.get();
+        const dynamics = this.params.dynamics.getModulated();
         voiceGain.gain.value = event.velocity * (1 - Math.random() * dynamics);
 
         // The panner is built per hit and only when it would do something —
         // an always-on StereoPannerNode per voice would be a node (and a
         // stereo upmix) that most hits don't need.
-        const panSpread = randomize.pan ? this.params.pan_spread.get() : 0;
+        const panSpread = randomize.pan ? this.params.pan_spread.getModulated() : 0;
         if (panSpread > 0) {
             const panner = this.audioContext.createStereoPanner();
             panner.pan.value = (Math.random() * 2 - 1) * panSpread;

@@ -25,6 +25,10 @@ static/patterns/
 ├── darkchords/
 │   ├── minor-drift.json
 │   └── nocturne.json
+├── ambientchords/        ← long, sparse, wide voicings for pads
+│   ├── drone-fifths.json
+│   ├── slow-bloom.json
+│   └── halo.json
 └── melodies/
     └── arp-cell.json
 ```
@@ -51,10 +55,21 @@ Every pattern is a grid of **steps**. What a step *means* depends on `kind`:
 | `kind` | A step is | Drives |
 |---|---|---|
 | `"drums"` | a hit (or not) on each drum category | `percsampler` |
-| `"notes"` | one or more scale degrees, played together | `karplus`, `oscsynth`, anything pitched |
+| `"notes"` | one or more scale degrees, played together | `karplus`, `granular`, `tapepad`, `oscsynth`, anything pitched |
 
 There is no separate kind for melodies — a melody is a `notes` pattern with one
 degree per step. A chord is the same thing with several.
+
+Two fields decide whether a `notes` pattern reads as a keyboard part or as a
+pad, and they're independent of the notes themselves: `step_beats` (how far
+apart the steps sit) and `duration` (how long each note lasts). A `duration`
+**longer** than `step_beats` makes chords overlap and bleed into each other,
+which is what the shipped `ambientchords` pack does throughout — `slow-bloom`
+puts a chord every 2 beats and lets each ring for 5. That pack is written for
+[`granular`](objects.md#granular--ribbitgranular), whose notes take seconds to
+bloom and fade, but nothing about it is granular-specific — the same pack
+drives three [`tapepad`](objects.md#tapepad--ribbittapepad) layers in the
+`ambient-tape` session, for the same reason.
 
 ---
 
@@ -321,6 +336,10 @@ start pulling it around.
   works.
 - [objects.md](objects.md#karplus--ribbitkarplus) — `karplus`, the polyphonic plucked string,
   which is what to point a chord pattern at.
+- [objects.md](objects.md#granular--ribbitgranular) — `granular`, and what the
+  `ambientchords` pack was written for.
+- [objects.md](objects.md#tapepad--ribbittapepad) — `tapepad`, the third
+  polyphonic synth: warped, lofi chords out of the same pack.
 - [commands.md](commands.md) — the full command vocabulary.
 - [../dev/creating-a-pattern.md](../dev/creating-a-pattern.md) — the format's
   internals, and how to extend it with a new token or a new kind.

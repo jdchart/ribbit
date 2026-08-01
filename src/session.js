@@ -1,5 +1,6 @@
 import { scheduleRamp, setInstant, scheduleAt, RibbitAutomationEvent } from "./automation.js";
 import { RibbitEvent } from "./event.js";
+import { addressableParams } from "./param.js";
 
 // Whole-session (de)serialization, plus the diff-and-ramp reconciler /recall
 // uses. Three entry points:
@@ -49,10 +50,15 @@ function serializeParams(paramsMap) {
 // more after a load/recall, which is the least-surprising reading of
 // "restore this state".
 function serializeAutomation(object) {
+    // addressableParams, not object.params: a track can automate its synth's
+    // params too (see commands.js's automate=), and a saved session that
+    // silently dropped exactly those would be the worst kind of data loss —
+    // one you only notice on reload.
+    const params = addressableParams(object);
     return object.automation
-        .filter((event) => event.paramKey && object.params[event.paramKey])
+        .filter((event) => event.paramKey && params[event.paramKey])
         .map((event) => {
-            const param = object.params[event.paramKey];
+            const param = params[event.paramKey];
             return {
                 param: event.paramKey,
                 from: param.decode(event.from),
@@ -70,9 +76,10 @@ function serializeAutomation(object) {
 // An entry naming a param the object no longer has is dropped silently —
 // same forgiving shape param application below already has.
 function rebuildAutomation(object, list = []) {
+    const params = addressableParams(object);
     return list
         .map((data) => {
-            const param = object.params[data.param];
+            const param = params[data.param];
             if (!param) return null;
             return new RibbitAutomationEvent({
                 beat: data.beat,

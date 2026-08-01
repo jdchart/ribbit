@@ -2,10 +2,12 @@
 
 A browser audio engine for live-coding music, built on the Web Audio API. It
 owns a graph of **tracks** (each wrapping a **synth**), **buses** (shared send
-destinations for sub-mixes or shared effects), **processors** (insert effects),
-**modulators** (control sources like LFOs, **patched** into any parameter), and
-a **master** bus — all playing against a shared, looping, lookahead-scheduled
-**clock**. A small, headless, text-driven take on Max/MSP or SuperCollider.
+destinations for sub-mixes or shared effects), **processors** (insert effects —
+reverb and delay, plus compression, saturation, tilt EQ and limiting for making
+a mix louder and more even), **modulators** (control sources like LFOs,
+**patched** into any parameter), and a **master** bus — all playing against a
+shared, looping, lookahead-scheduled **clock**. A small, headless, text-driven
+take on Max/MSP or SuperCollider.
 
 Ribbit is UI-agnostic: it's plain browser ESM with no framework dependency. You
 drive it either by calling its methods directly, or through its built-in
@@ -66,28 +68,31 @@ in the browser only (e.g. inside `onMount` in a SvelteKit app).
 
 ### Samples
 
-The built-in `sampler` and `percsampler` synths fetch sample files from the
-host's `/samples/` path — the host app is responsible for serving them there
-(e.g. SvelteKit's `static/samples/`).
+The built-in `sampler`, `percsampler` and `granular` synths fetch sample files
+from the host's `/samples/` path — the host app is responsible for serving them
+there (e.g. SvelteKit's `static/samples/`).
 
-`percsampler` additionally builds its kit by picking at random from the host's
-library, and a browser can't list a directory over HTTP, so it expects a
-manifest at `/samples/manifest.json` (overridable per instance via the
-`manifest_url` option):
+`percsampler` builds its kit by picking at random from the host's library, and
+`granular` picks one source recording the same way. A browser can't list a
+directory over HTTP, so both expect a manifest at `/samples/manifest.json`
+(overridable per instance via the `manifest_url` option):
 
 ```json
 {
   "kicks":  ["kicks/kick01.wav", "kicks/kick02.wav"],
   "snares": ["snares/snare01.wav"],
   "hats":   ["hats/hat01.wav"],
-  "percs":  ["percs/perc01.wav"]
+  "percs":  ["percs/perc01.wav"],
+  "foley":  ["foley/rain.wav", "foley/river.wav"]
 }
 ```
 
-Each entry is a path relative to that same `/samples/` prefix. Serving it is
-the host's job — `nllc` generates it on request from `static/samples/`. A host
-that serves no manifest gets an empty kit and a console warning, not an
-error.
+Each entry is a path relative to that same `/samples/` prefix. The four drum
+categories are expected by `percsampler`, whose slot layout is built from them;
+any **other** key is an ordinary folder that `granular` can read by name
+(`folder=foley`, its default). Serving it is the host's job — `nllc` generates
+it on request from `static/samples/`. A host that serves no manifest gets an
+empty kit and a console warning, not an error.
 
 ### Patterns
 
@@ -145,6 +150,8 @@ Import surface (see [`src/index.js`](src/index.js)):
   `fetchPatternManifest`, `mulberry32`, `randomSeed`
 - **Built-in types** — `RibbitOscSynth`, `RibbitSampler`, `RibbitPercSampler`
   (plus `PERC_CATEGORIES`), `RibbitKarplus`, `RibbitReverb`, `RibbitDelay`,
+  `RibbitCompressor`, `RibbitSaturator` (plus `SATURATOR_CHARACTERS`),
+  `RibbitTilt`, `RibbitLimiter`, `RibbitGoodenizer`,
   `RibbitLFO`, `RibbitRandomNotes`, `RibbitCV`, `RibbitMarkovPercs`,
   `RibbitEuclidPercs`, `RibbitPatternVariator`.
   See [docs/llm/catalog.md](docs/llm/catalog.md) for each one's params and

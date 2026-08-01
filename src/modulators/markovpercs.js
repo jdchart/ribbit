@@ -254,8 +254,8 @@ export class RibbitMarkovPercs extends RibbitModulator {
         if (this.pattern.length === 0) return [];
 
         const stride = this._stride();
-        const velocity = this.params.velocity.get();
-        const swing = this.params.swing.get();
+        const velocity = this.params.velocity.getModulated();
+        const swing = this.params.swing.getModulated();
         const events = [];
 
         // 1e-9 absorbs the float error in beat arithmetic, so a step landing

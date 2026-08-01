@@ -327,6 +327,35 @@ that still exposes a getter like `get wet()` (for use as an
 `RibbitAutomationEvent` target elsewhere in the codebase) does so as a thin
 delegate onto `this.params.wet.audioParam`, not a second implementation.
 
+**`onSet` has a known ceiling, and there's a second technique above it.**
+`onSet` only overrides the *instant-set* path, so a param wired that way ramps
+only its primary node and strands the rest — the standing `RibbitDelay`
+`time`/`feedback` limitation. Where a value must drive several nodes *through
+ramps too*, the param is instead a `ConstantSourceNode`'s `.offset` (created by
+`RibbitParamSources`) connected into every target `AudioParam`, optionally via
+scaling or inverting gains. `AudioParam` connections *sum* onto the intrinsic
+value, so one param moves all of them identically under sets, ramps, deferred
+`at=` and `/patch`. `RibbitProcessor.createCrossfade` uses this for dry/wet
+(`dryGain` intrinsic 1 minus mix, `wetGain` intrinsic 0 plus mix) and
+`RibbitTilt` for its two shelf gains. The cost is an owned running node, which
+is why `dispose()` now exists on `RibbitProcessor` too.
+
+**Dry/wet is a design decision with two correct answers.** `reverb`/`delay`
+keep dry at unity and add wet — right for an effect placed *beside* a signal.
+The dynamics and tone processors use a true crossfade (dry = 1 - mix) because
+they act *on* the signal: a compressor whose dry path ran at unity could never
+tame a peak, since the untouched peak passes through beside it. Some processors
+correctly have neither (`tilt`, `limiter`).
+
+**One processor is a composite.** `RibbitGoodenizer` builds a compressor,
+saturator, tilt and limiter directly (not via `createProcessor`, so they're
+unregistered and unaddressable), chains them, and republishes their actual
+`RibbitParam`/option objects as its own. Because everything generic in the
+engine reads `params`/`options` rather than knowing types, that alone gives it
+help text, ramping, `at=`, patch destinations and session round-tripping with
+no special-casing anywhere — and guarantees the composite's controls and the
+standalone processors' controls can never diverge.
+
 **Options** are the non-rampable counterpart, with the same
 one-declaration-drives-everything philosophy: every synth/processor/
 modulator also exposes `this.options = { key: { get(), set(value),
@@ -576,7 +605,9 @@ Two exported functions call into it for two different use cases:
   directly for `RibbitAutomationEvent`s sitting in a unit's `.automation` array,
   matched against loop-relative beat position the same way `events` are.
   These are authored from the console: `automate=<param> to= [from= beat=
-  duration= curve= once]` on any channel (gain/pan), processor, or
+  duration= curve= once]` on any channel (gain/pan, plus a track's synth's
+  own params — `addressableParams()` in `param.js` is the one place that
+  knows a channel's surface includes its synth's), processor, or
   modulator (all three own an `.automation` array — `RibbitModulator` grew
   one for this), with `automations`/`remove_automation=<n>`/
   `clear_automation` for inspection/removal. A console-authored event
@@ -705,6 +736,12 @@ registration step beyond what `Ribbit.createTrack`/`createBus`/`createProcessor`
 `createModulator` already do. A bus dispatches through the exact same
 `channelCommand` a track does — see [adding-commands.md](adding-commands.md)
 for extending it.
+
+Both one-liners also append an optional duck-typed `describeState()` — for
+state that is neither a param nor an option, like `markovpercs`' generated
+pattern or which recording a `granular` track rolled onto. `channelSummary`
+reaches it through `channel.source`, since a synth isn't separately
+addressable.
 
 Every addressable object answers three ways: no params (`channelSummary`/
 `paramObjectSummary` — a condensed one-liner), `help` (`channelHelp`/

@@ -97,8 +97,9 @@ instead of being pinned to slot 0.
 Kicks deliberately opt out of pan and speed so they keep anchoring the track;
 snares hold the centre but may vary in pitch. These are the engine's first
 **rampable synth params**, so they behave like any other param — `/hats
-pan_spread=0.8 4b`, `at=cycle`, `automate=`, and they're valid `/patch`
-destinations (`/patch source=lfo1 dest=hats.pan_spread depth=0.4`).
+pan_spread=0.8 4b`, `at=cycle`, and an instant set all work, read fresh from
+the next hit onward. (`automate=` and `/patch` reach them too, one hit at a
+time — see [Modulating a synth param](#modulating-a-synth-param).)
 
 #### Generating a new kit
 
@@ -199,12 +200,11 @@ harmony context instead, which is what a `notes` pattern emits.
 /keys excitation=pulse at=cycle # cleaner attack from the next downbeat
 ```
 
-All three params are valid `/patch` destinations, so an LFO on `brightness`
-gives you a slowly-breathing string:
+All three ramp, so a phrase can open up or go dull under your hands:
 
 ```
-/add_modulator type=lfo name=sway freq=0.05
-/patch source=sway dest=keys.brightness depth=0.25
+/keys brightness=0.1 8b         # darken over 8 beats
+/keys decay=0.4 4b              # and shorten the strings
 ```
 
 > **A note on the top octave.** Each pluck is rendered into a buffer rather
@@ -213,6 +213,227 @@ gives you a slowly-breathing string:
 > trade-off is that pitch quantizes to a whole number of samples: accurate
 > within a few cents up to C6, drifting to about a fifth of a semitone by G6.
 > Inaudible in normal use, worth knowing if you write very high parts.
+
+### `granular` — `RibbitGranular`
+
+> A granular synth: one source recording (picked at random from a folder of
+> the host's sample library) played back as a cloud of short overlapping
+> grains, for sustained pad textures. Plays chords; degrees transpose the
+> grains against the shared harmony context.
+
+**A note here is not a playback.** Each note schedules dozens of overlapping
+short slices — *grains* — taken from around a movable playhead in one source
+recording, each sprayed in read position, pitch, timing and stereo placement.
+Feed it a few seconds of foley (rain, a river, glass, birds) and what comes
+out has no relationship to the recording's own rhythm: it's a sustained
+texture whose character is the recording's timbre.
+
+The structure is **two stages, and the split is the instrument**:
+
+| Stage | Controls | What it shapes |
+|---|---|---|
+| Voice envelope | `attack`, `release` | the *note* — this is what makes it a pad |
+| The cloud | `density`, `grain_size`, `spray`, `position`, `drift`, `pitch_spread`, `pan_spread` | the *texture* inside that note |
+
+Polyphonic, like `karplus`: a chord is three clouds overlapping, with no voice
+limit to run out of. An event's `degree` resolves against the shared harmony
+context and sets each grain's playback rate relative to `root`; `pitch` is a
+MIDI note. Transposition is a **tape-speed** gesture — pitch and grain content
+move together, so a low note doesn't merely sound lower, it reads *slower*
+through the material. That's most of why unpitched foley works as harmony.
+
+| Constructor option | Default | Runtime **param** | Meaning |
+|---|---|---|---|
+| `density` | `30` | `density` | Grains per second. Low is a stuttering, pointillist texture; high is a solid wash. Clamped `1..200`. Rampable. |
+| `grain_size` | `0.2` | `grain_size` | Seconds per grain. Below ~30ms the grain *rate* starts to be heard as a pitch of its own; above ~0.5s you hear the source's own movement inside each grain. Clamped `0.005..2`. Rampable. |
+| `spray` | `0.25` | `spray` | How far, in seconds of source material, each grain may wander either side of the playhead. `0` is every grain reading the same instant (a frozen, almost tonal drone); a second or two smears a whole phrase into one chord. Clamped `0..10`. Rampable. |
+| `position` | `0` | `position` | The playhead: where in the recording the cloud reads from, `0..1` across the whole buffer. Rampable — walking it across 16 beats is the signature gesture. |
+| `drift` | `0.05` | `drift` | How fast the playhead moves *while a note is held*, in source seconds per second. `0` freezes it (the classic granular pad), `1` is natural speed, negative runs the material backwards through the note without reversing the grains themselves. Clamped `-2..2`. Rampable. |
+| `pitch_spread` | `0.15` | `pitch_spread` | Random detune per grain, in semitones either way. A fraction of a semitone is chorus — the cheapest lushness there is; several semitones is a cloud that no longer agrees with itself about what note it's playing. Clamped `0..24`. Rampable. |
+| `pan_spread` | `0.8` | `pan_spread` | Random stereo placement per grain (`1` = hard left to hard right). Wide by default: grains scattered across the field is most of what makes a cloud sound like a *space* rather than a sound. Clamped `0..1`. Rampable. |
+| `attack` | `1.2` | `attack` | Seconds to reach full level. Capped at the written note's own length. Clamped `0..10`. Rampable. |
+| `release` | `2` | `release` | Seconds to fall away after the written duration ends. Grains keep spawning through it, so the tail is granular too rather than a fade over a frozen cloud. Clamped `0..10`. Rampable. |
+
+| Constructor option | Default | Runtime option | Meaning |
+|---|---|---|---|
+| `sample` | random | `sample` | The source recording. Either the literal `random` (re-roll within the current folder) or a path. Reports the **resolved** path, so a saved session restores the recording it was built with rather than rolling a new one. Not rampable. |
+| `folder` | `"foley"` | `folder` | Which folder of the host's sample library rolls come from. Changing it re-rolls; setting it to its current value is a deliberate no-op. An unknown folder is rejected with the list of real ones. Not rampable. |
+| `window` | `"hann"` | `window` | The fade applied to each grain, without which every one would click. `hann` is smooth at both ends (grains melt together), `tri` is a touch more present, `expo` gives each grain an attack so the cloud reads as a shimmer of tiny events. Not rampable. |
+| `direction` | `"forward"` | `direction` | Which way grains read the source: `forward`, `reverse`, or `mixed` (each grain decides). Not rampable — see the memory note below. |
+| `root` | `60` | `root` | Which MIDI note plays the source at its natural speed. Everything else transposes from here, so this is how a part written around degree 0 is placed where the material still sounds like itself: raise it and the whole part reads slower and deeper. Not rampable. |
+
+```
+/add_track name=pad synth=granular
+/pad                            # which recording it landed on, and how long
+/pad add_event beat=0 degree=0 duration=4
+/pad position=0.9 16b           # walk the playhead through the recording
+/pad spray=3 8b                 # smear a whole phrase into one chord
+/pad grain_size=0.02 8b         # from a wash to a buzz
+/pad sample=random              # a different recording
+/pad window=expo at=cycle       # change the grain shape on the downbeat
+```
+
+Best driven by a `notes` [pattern](patterns.md) through `patternvariator` —
+the `ambientchords` pack ships for exactly this. See `/code-editor/granular-pad`
+for a three-track worked example.
+
+#### Sources, and why they're gain-matched
+
+The source is chosen at random from the host's library the same way
+`percsampler` fills a kit, through the same
+[manifest](#where-the-samples-come-from) — the only difference is that any
+folder works, not just the four drum categories.
+
+A library of field recordings is **not mastered**: the shipped `foley` folder
+runs from an unnormalized river recording peaking at −30dB to a texture at
+full scale. So each source is **peak-normalized on load** (capped at 20×) and
+the match is shown in the track's summary:
+
+```
+/pad
+pad — gain=0.60 ... synth=granular("...") "Jonathan Kawchuk - Tidal Pool" 6.4s x20.0
+```
+
+Without it, `sample=random` would change a track's level by 30dB and every
+mix decision would have to be redone after each roll. If a track is too loud
+or quiet, the fix is its `gain`, not the source.
+
+> **Console limitation, same as `percsampler`:** an explicit `sample=` path is
+> really only settable from a session file, because sample paths contain `/`
+> and spaces and the console's parser treats those as command and value
+> boundaries. Ribbit rejects the truncated result rather than loading
+> nonsense. Use `sample=random` at the console.
+
+#### Cost
+
+Every grain is three Web Audio nodes, and a note schedules its **whole cloud
+up front**. `density` is therefore the CPU knob: 20–40 is a pad, 200 is a
+stress test. A note that would need more than 400 grains gets a *thinner*
+cloud spanning its full length rather than one that stops early.
+
+`direction` other than `forward` builds a reversed copy of the buffer — Web
+Audio has no backwards playback — which doubles what that track holds in
+memory. It's built when you set the option, not per note, so the cost lands on
+the command rather than on a note starting.
+
+> **Big recordings load slowly.** Loading is fire-and-forget, like every
+> sampler here: a note before the file arrives is silent rather than queued,
+> and the summary says `(loading)` until it lands. The shipped `foley` folder
+> contains recordings up to four minutes long.
+
+### `tapepad` — `RibbitTapePad`
+
+> A polyphonic pad played through a tape machine: detuned oscillator stacks
+> into one shared transport (wow/flutter pitch drift) and one shared tape
+> stage (saturation, bit crush, bandwidth, hiss). Built for slow, warped,
+> lofi chords.
+
+The structure is **two halves, and the split is the instrument**:
+
+| Half | Controls | What it is |
+|---|---|---|
+| Per note | `cutoff`, `detune`, `pan_spread`, `sub`, `attack`, `release`, `waveform`, `voices` | ordinary subtractive voicing — a stack of oscillators, a filter, an envelope |
+| The machine | `wow`, `wow_rate`, `flutter`, `sat`, `bits`, `hiss` | one tape transport and one tape stage, shared by every note and running all the time |
+
+**The machine is shared, not per-voice, and that's the sound.** A tape
+recorder has one capstan, so when it wavers the whole chord bends *together*.
+Give every voice its own wobble instead and a chord smears into a chorus — a
+lush effect, but not a warped recording. The same goes for saturation and
+crush: they act on the summed chord, so the voices interfere with each other
+on the way through. That intermodulation is where the dirt comes from.
+
+It also has a practical consequence, and it's the one thing about this synth
+worth designing around: because those six live on always-running nodes, they
+are **continuous**. `/pad wow=60 8b` warps the tape *while a chord is
+sustaining*. The per-note half behaves like every other synth param — read
+once when a note is scheduled (see [below](#modulating-a-synth-param)).
+
+Polyphonic, like `karplus` and `granular`: a chord is several stacks
+overlapping, with no voice limit to run out of. An event's `degree` resolves
+against the shared harmony context; `pitch` is a MIDI note.
+
+| Constructor option | Default | Runtime **param** | Meaning |
+|---|---|---|---|
+| `cutoff` | `1400` | `cutoff` | Corner of the per-note lowpass, in Hz. Also swept by the envelope — the filter opens to `cutoff` across the attack and eases back over the tail, so a long chord breathes. Clamped `40..16000`. Rampable. |
+| `detune` | `14` | `detune` | Spread between the stacked oscillators, in cents, widest pair first. The thickness control: `0` collapses the stack to one oscillator's worth of tone, past ~30 it stops being a chorus and starts being out of tune. Clamped `0..60`. Rampable. |
+| `pan_spread` | `0.5` | `pan_spread` | How far apart the stack is panned. Shares its position with the detune spread — the sharp voice one side, the flat one the other — so widening it widens the beating too. No effect at `voices=1`. Clamped `0..1`. Rampable. |
+| `sub` | `0.35` | `sub` | Level of a sine an octave below the note. Routed *past* the filter, so closing `cutoff` right down darkens the pad without hollowing out its bottom end. Clamped `0..1`. Rampable. |
+| `attack` | `0.9` | `attack` | Seconds to reach full level. Capped per note at the written note's own length, so a 3-second swell inside a 1-second note peaks at 1 second rather than never arriving. Clamped `0..10`. Rampable. |
+| `release` | `2.5` | `release` | Seconds to fall away after the written duration ends. This is what makes the chords overlap. Clamped `0..10`. Rampable. |
+| `wow` | `18` | `wow` | Depth of the slow pitch wander, in cents. **Continuous** — ramps and patches move it mid-chord. Clamped `0..200`. Rampable. |
+| `wow_rate` | `1` | `wow_rate` | How fast that wander runs, as a **multiplier**, not a frequency — the drift is a sum of five partials, so there's no single rate to name. `1` is the natural wobble. Continuous. Clamped `0.1..8`. Rampable. |
+| `flutter` | `10` | `flutter` | Depth of the fast tremble, in cents. A separate control from `wow` because they're different faults — a warped reel versus a worn capstan — and much more of the first than the second is most of what "tape" means. Continuous. Clamped `0..200`. Rampable. |
+| `hiss` | `0.15` | `hiss` | Level of the tape noise floor. Runs whether or not the track is playing, because a tape machine hisses when the music stops; set `0` if that isn't wanted. Continuous. Clamped `0..1`. Rampable. |
+| `sat` | `1.4` | `sat` | Drive into the tape saturation curve. Louder as well as dirtier — the track's own `gain` is the balance control, the same trade [`saturator`](#saturator--ribbitsaturator) makes. Continuous. Clamped `1..20`. Rampable. |
+
+| Constructor option | Default | Runtime option | Meaning |
+|---|---|---|---|
+| `waveform` | `"sawtooth"` | `waveform` | Shape of each oscillator in the stack: `sine`, `triangle`, `sawtooth`, `square`. Sawtooth has the most for the filter to work on; triangle is the mellow one. Not rampable. |
+| `voices` | `3` | `voices` | Oscillators per note, `1..5`. Not a param because there's no such thing as 2.5 oscillators — the value indexes a stack, so sweeping it isn't a gesture. Not rampable. |
+| `bits` | `12` | `bits` | Quantization depth of the crush stage, `3..16`. An option rather than a param because setting it rebuilds a lookup curve. **12 and above is effectively clean**; the range below that is where it sounds like a cheap sampler. Not rampable. |
+
+```
+/add_track name=pad synth=tapepad
+/pad add_event beat=0 degree=0 duration=4
+/pad wow=60 8b                  # warp the tape, slowly — mid-chord
+/pad wow_rate=3 8b              # and make the warp faster
+/pad bits=5                     # cheap sampler
+/pad sat=6 4b                   # drive the tape harder
+/pad cutoff=400 16b             # close it right down — the sub stays
+/pad voices=5 detune=30         # thicker, and further out of tune
+/pad hiss=0.6                   # tape noise as an instrument
+/pad waveform=triangle at=cycle # swap the oscillator on the downbeat
+```
+
+Best driven by a `notes` [pattern](patterns.md) through `patternvariator` —
+the `ambientchords` pack ships for exactly this. See `/code-editor/ambient-tape`
+for a three-layer worked example.
+
+> **What isn't here: sample-rate reduction**, the other half of a real lofi
+> stage. Holding each sample for N frames needs per-sample JavaScript, which
+> in Web Audio means an `AudioWorklet` module the host would have to serve —
+> and the engine deliberately never asks a host for anything but JSON. `bits`
+> covers the audible half of the same idea.
+
+### Modulating a synth param
+
+Most synth params (`percsampler`'s, `karplus`'s, `granular`'s, and six of
+`tapepad`'s) are **read in JavaScript when a note is scheduled**. Every
+gesture reaches them —
+
+| Gesture | |
+|---|---|
+| Instant set — `/pad density=60` | yes |
+| Console ramp — `/pad position=0.9 16b` | yes |
+| Deferred — `/pad window=expo at=cycle` | yes |
+| Loop automation — `/pad automate=position to=0.9 duration=8` | yes |
+| `/patch source=lfo1 dest=pad.position` | yes |
+| `/save` / `/recall` | yes |
+
+— but *when* they're read is the thing to design around. The value is sampled
+**once per note**, at the moment that note is scheduled, not continuously. So
+an LFO patched into `position` gives every grain cloud a different starting
+point rather than sweeping a cloud already in flight, and an LFO cycling
+faster than the notes arrive will alias into something arbitrary. Both are
+useful; neither is a smooth sweep.
+
+The same applies to `velocity`, `swing`, `probability` and `dropout` on an
+event-generating modulator — patch an LFO into `dropout` and the pattern
+thins and fills over the LFO's cycle, one event at a time.
+
+For a granular track that evolves *within* a note, reach instead for a
+non-zero `drift` (each held note walks its own playhead), or patch the LFO
+into the track's `gain` or a send, which are continuous audio-graph params.
+
+The exception is [`tapepad`](#tapepad--ribbittapepad), whose `wow`,
+`wow_rate`, `flutter`, `hiss` and `sat` sit on always-running shared nodes
+rather than being read per note — so those five belong in the *first* group,
+alongside `gain` and every processor param, and a patch into them sweeps a
+sustaining chord. Nothing in the command surface marks the difference; it's
+listed per param in that section's tables.
+
+`/save` records the param's own value, never the momentarily-modulated one —
+a session file saved under a moving LFO reloads the way you set it up.
 
 ## Buses (`/add_bus`)
 
@@ -234,6 +455,19 @@ instead. See [commands.md](commands.md#buses-and-sends) for the full
 `out=`/`add_send=`/`remove_send=`/`send=` reference.
 
 ## Processors (`add_processor=` on any channel)
+
+Seven processors, in two groups.
+
+**Effects** — `reverb` and `delay` — add something *beside* your signal. The dry
+path always runs at unity and the wet path is added on top, so `wet=0` means
+"off" and `wet=1` means "as much again".
+
+**Dynamics and tone** — `compressor`, `saturator`, `tilt`, `limiter` and the
+`goodenizer` that combines all four — act *on* the signal itself. Where they
+have a `mix` at all it's a true crossfade: `mix=1` is fully processed, `mix=0`
+is fully bypassed, and `mix=0.5` is half of each. That difference is not
+cosmetic. A compressor whose dry path ran at unity could never actually tame a
+peak, because the untouched peak would sail straight through beside it.
 
 ### `reverb` — `RibbitReverb`
 
@@ -263,6 +497,213 @@ lines that feed back into *each other* (ping-pong) rather than themselves.
 | `feedback` | `0.35` | `feedback` | Cross-feedback amount (applied symmetrically to both channels). Clamped to `0..0.95` — at or past unity the cross-feeding lines recirculate a growing signal forever (a runaway loop, not an effect). |
 | `wet` | `0.3` | `wet` | Wet-signal mix level. Clamped to `0..2`. |
 | `stereoOffset` | `0.06`s | `stereoOffset` (option) | Extra delay time on the right channel for stereo width (`0..1`s). Runtime-settable option — not rampable. |
+
+### `compressor` — `RibbitCompressor`
+
+> A dynamics compressor with makeup gain and a true dry/wet mix (turn mix down
+> for parallel compression).
+
+Turns down whatever is louder than `threshold`, so the whole thing can then be
+turned up. `makeup` is the turning-up half — without it a compressor only ever
+makes things quieter.
+
+| Constructor option | Default | Runtime param | Meaning |
+|---|---|---|---|
+| `threshold` | `-18` | `threshold` | Level in dB above which reduction starts (`-100..0`). Lower means more of the signal gets compressed. |
+| `ratio` | `4` | `ratio` | How hard it reduces past the threshold (`1..20`). `4` means 4dB in becomes 1dB out. |
+| `attack` | `0.01`s | `attack` | How fast it clamps down (`0..1`). Short catches transients; long lets them through and squashes what follows. |
+| `release` | `0.15`s | `release` | How fast it lets go (`0..1`). This is the one that decides whether compression sounds like glue or like pumping. |
+| `knee` | `6` | `knee` | dB of softening around the threshold (`0..40`). `0` is an abrupt corner. |
+| `makeup` | `1` | `makeup` | Output gain after compression (`0..8`, linear not dB). |
+| `mix` | `1` | `mix` | Crossfade between untouched and compressed (`0..1`). |
+
+Every one of these is a real param, so they ramp (`/compressor threshold=-40
+4b`), automate, and can be `/patch` destinations. That last one is worth
+knowing:
+
+```
+/master add_processor=compressor
+/add_modulator type=lfo freq=0.5 name=pump
+/patch source=pump dest=compressor.threshold depth=15
+```
+
+The threshold now moves in time, so the compressor breathes with the beat —
+the sidechain-pumping trick, without needing a sidechain input.
+
+Turning `mix` down gives **parallel compression**: a heavily squashed copy
+blended under the untouched signal, which adds weight without flattening
+dynamics. Set `threshold` very low and `ratio` high, then blend to taste.
+
+A processor is named after its type (`add_processor=` takes no name), so this
+one is addressed as `/compressor`; a second one on the same graph becomes
+`/compressor_2`. On its own it reports live gain reduction, which is the only
+way to see what it's actually doing:
+
+```
+compressor (p1): A dynamics compressor... [threshold=-38.000, ...] reducing -12.4 dB
+```
+
+### `saturator` — `RibbitSaturator`
+
+> Waveshaping saturation: a drive stage into one of four transfer curves, from
+> gentle tape warmth to a wavefolder.
+
+Distortion, of the useful kind. `drive` pushes the signal into a fixed transfer
+curve; `character` picks which curve.
+
+| Constructor option | Default | Runtime param | Meaning |
+|---|---|---|---|
+| `drive` | `2` | `drive` | Pre-gain into the curve (`1..50`). This is the amount control — at `1` the stage is essentially clean. |
+| `level` | `1` | `level` | Output trim (`0..2`). |
+| `mix` | `1` | `mix` | Crossfade (`0..1`). Below `1` this is parallel distortion. |
+| `character` | `soft` | `character` (option) | `soft`, `hard`, `fold` or `tape`. Rebuilds the curve — an option, not rampable, but schedulable like anything else (`character=fold at=cycle`). |
+| `oversample` | `2x` | `oversample` (option) | `none`, `2x` or `4x`. Higher reduces aliasing at the cost of a little CPU. |
+
+The four characters:
+
+- **`soft`** — a `tanh` clipper. Peaks rounded off gradually. The safe one.
+- **`hard`** — straight clipping with a sharp corner. Buzzy odd harmonics, no
+  rounding. Below full scale it's the identity, so it's the most transparent of
+  the four until `drive` actually pushes into it.
+- **`fold`** — a wavefolder. Past its peak the curve turns around and comes back
+  down, so a louder input gets a *different* shape rather than a flatter one.
+  Inharmonic and metallic; nothing like the other three.
+- **`tape`** — asymmetric soft clipping, adding even harmonics alongside the odd
+  ones.
+
+**`drive` is the amount; `character` is the flavour.** The curves are normalized
+so that at `drive=1` the stage passes signal through very nearly untouched, and
+everything you hear comes from raising `drive`. That's deliberate — it means the
+stage is safe to leave in a chain that isn't asking for dirt.
+
+```
+/keys add_processor=saturator
+/saturator drive=12 character=tape     tape warmth, pushed
+/saturator drive=25 character=fold     metallic and inharmonic
+/saturator mix=0.4                     parallel distortion
+/saturator drive=1                     back to clean
+```
+
+Each character has its own output level at high drive — a wavefolder ends up
+quieter than a clipper, which is true of real ones too. That's what `level` is
+for.
+
+### `tilt` — `RibbitTilt`
+
+> A tilt EQ: one control trading low end against high end around a pivot
+> frequency.
+
+One knob. Negative is darker and fuller, positive is brighter and thinner, zero
+is flat. A low shelf and a high shelf pivot around the same frequency, moving in
+opposite directions.
+
+| Constructor option | Default | Runtime param | Meaning |
+|---|---|---|---|
+| `tone` | `0` | `tone` | The tilt (`-1..1`). Each end swings up to ±12dB, which is fixed. |
+| `pivot` | `800`Hz | `pivot` | Where the see-saw pivots (`100..8000`). Below it gets one direction, above it the other. |
+
+There's no `mix` — an EQ blended with its own dry signal is just a weaker EQ,
+and `tone=0` is already "no effect".
+
+Most of what people mean by a mix sounding wrong is a broad tonal tilt rather
+than anything narrow, which is why this is the one EQ shape worth having before
+any other. Both params ramp, so it doubles as a sweep:
+
+```
+/master add_processor=tilt
+/tilt tone=-0.7 8b        slowly pull everything dark
+/tilt tone=0.5 4b         and back up bright
+/tilt pivot=2500          move where the trade happens
+```
+
+### `limiter` — `RibbitLimiter`
+
+> A loudness ceiling: a boost stage into a fast, high-ratio compressor that
+> holds the output near a set level.
+
+`boost` drives the signal up, `ceiling` holds whatever comes out under a level.
+That pairing is the point — a limiter on its own only makes things quieter, and
+it's the boost underneath that turns "nothing clips" into "everything is loud
+and even".
+
+| Constructor option | Default | Runtime param | Meaning |
+|---|---|---|---|
+| `boost` | `1` | `boost` | Pre-gain into the limiter (`0..8`, linear). Raise this to get louder; the ceiling stops it running away. |
+| `ceiling` | `-1` dB | `ceiling` | Where the output is held (`-40..0`). |
+| `release` | `0.1`s | `release` | How fast it lets go (`0.01..1`). |
+
+Ratio, knee and attack are fixed and not exposed — a limiter with those
+adjustable is just a compressor, and `compressor` already exists.
+
+**It is honestly a fast compressor, not a lookahead brickwall.** Web Audio
+offers no lookahead, so a fast enough transient can still poke a little past
+the ceiling. Treat `ceiling` as "about here" rather than a guarantee, which is
+why it defaults to `-1` and not `0`. `/limiter` reports live reduction.
+
+### `goodenizer` — `RibbitGoodenizer`
+
+> The whole chain in one box: compressor into saturator into tilt EQ into
+> limiter. Makes anything louder and more even; raise `drive=` for dirt.
+
+Put it on master and stop thinking about it. It builds one of each of the four
+processors above and chains them in that order:
+
+```
+compress → saturate → tilt → limit
+```
+
+The order is the argument it makes. Compression first, so the saturator gets a
+level that barely moves — that's what keeps distortion character *consistent*
+instead of lurching between clean and fried as the music gets busier, and it's
+most of what "evenly mixed" actually means. Tilt after the saturator, because
+saturation adds its own top end and you want to voice what came out. Limiter
+last, always, since anything after it could undo it.
+
+| Constructor option | Default | Runtime param | From |
+|---|---|---|---|
+| `threshold` | `-20` | `threshold` | compressor |
+| `ratio` | `4` | `ratio` | compressor |
+| `attack` | `0.01` | `attack` | compressor |
+| `release` | `0.12` | `release` | compressor |
+| `makeup` | `1.4` | `makeup` | compressor |
+| `drive` | `1` | `drive` | saturator |
+| `character` | `soft` | `character` (option) | saturator |
+| `oversample` | `2x` | `oversample` (option) | saturator |
+| `tone` | `0.15` | `tone` | tilt |
+| `pivot` | `900` | `pivot` | tilt |
+| `ceiling` | `-1` | `ceiling` | limiter |
+| `mix` | `1` | `mix` | its own crossfade over the whole chain |
+
+**`drive` defaults to `1`, meaning the saturation stage is present but clean.**
+That's on purpose. Compression, tilt and limiting make a mix *more like itself*
+— louder, steadier, better balanced. Saturation makes it into something else,
+and something that alters timbre by default isn't something you want on every
+session. It waits to be asked:
+
+```
+/master add_processor=goodenizer
+/goodenizer                       live reduction from both its compressor and limiter
+/goodenizer mix=0                 hear the mix with nothing on it
+/goodenizer mix=1 2               fade the treatment back in over 2 seconds
+/goodenizer drive=9               stop being polite
+/goodenizer character=fold        and get strange
+/goodenizer drive=1               back to clean
+```
+
+Some controls are deliberately *not* exposed here: the children's own `mix`, the
+saturator's `level`, the limiter's `boost`. Each would be a second way to set
+the same balance. Use the four processors individually when you want them.
+
+It is a **composite, not a separate implementation** — `/goodenizer threshold=`
+and a standalone `/compressor threshold=` are the same control on two different
+compressors, running the same code. So anything true of the four above is true
+here.
+
+**When to use which:** reach for the four individually when you want one thing
+(parallel compression on a drum bus, a wavefolder on a lead, a tilt to fix a
+dull mix); reach for the `goodenizer` when you want the whole thing to sound
+good and would rather not decide. Every session that ships with ribbit runs one
+on master, named `glue`. The `goodenizer-demo` session tours all five.
 
 ## Modulators (`type=` on `/add_modulator`)
 
@@ -515,7 +956,9 @@ a part can stay recognisably itself while never being quite identical twice.
 It drives either shape of material: a `drums` pattern feeds a
 [`percsampler`](#percsampler--ribbitpercsampler) through the same slot contract
 every other drum generator uses, and a `notes` pattern feeds any pitched synth
-(most naturally [`karplus`](#karplus--ribbitkarplus), which plays chords).
+— most naturally [`karplus`](#karplus--ribbitkarplus),
+[`granular`](#granular--ribbitgranular) or
+[`tapepad`](#tapepad--ribbittapepad), the three that play chords.
 
 **Selecting a pattern:**
 
@@ -599,9 +1042,11 @@ or a token line for notes:
 /beat pattern=dusty at=cycle   # swap on the next downbeat
 ```
 
-Two example sessions ship with the reference app: `pattern-drums` (two
-variators over a split kit, one of them phasing) and `pattern-chords`
-(chords and a melody on two `karplus` tracks).
+Four example sessions ship with the reference app: `pattern-drums` (two
+variators over a split kit, one of them phasing), `pattern-chords` (chords and
+a melody on two `karplus` tracks), `granular-pad` (three variators over
+the `ambientchords` pack, driving granular clouds), and `ambient-tape` (the
+same pack again, driving three `tapepad` layers over a dusty beat).
 
 ## Events
 

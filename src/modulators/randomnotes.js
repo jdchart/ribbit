@@ -66,8 +66,8 @@ export class RibbitRandomNotes extends RibbitModulator {
     generateEvents(fromBeat, toBeat) {
         if (this._nextCandidateBeat === undefined) this._nextCandidateBeat = fromBeat;
 
-        const probability = this.params.probability.get();
-        const minGap = this.params.min_gap.get();
+        const probability = this.params.probability.getModulated();
+        const minGap = this.params.min_gap.getModulated();
 
         const events = [];
         while (this._nextCandidateBeat < toBeat) {

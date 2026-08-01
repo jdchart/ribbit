@@ -3,10 +3,17 @@ import { RibbitChannel } from "./channel.js";
 import { RibbitTrack } from "./track.js";
 import { RibbitReverb } from "./processors/reverb.js";
 import { RibbitDelay } from "./processors/delay.js";
+import { RibbitCompressor } from "./processors/compressor.js";
+import { RibbitSaturator } from "./processors/saturator.js";
+import { RibbitTilt } from "./processors/tilt.js";
+import { RibbitLimiter } from "./processors/limiter.js";
+import { RibbitGoodenizer } from "./processors/goodenizer.js";
 import { RibbitOscSynth } from "./synths/oscsynth.js";
 import { RibbitSampler } from "./synths/sampler.js";
 import { RibbitPercSampler } from "./synths/percsampler.js";
 import { RibbitKarplus } from "./synths/karplus.js";
+import { RibbitGranular } from "./synths/granular.js";
+import { RibbitTapePad } from "./synths/tapepad.js";
 import { RibbitLFO } from "./modulators/lfo.js";
 import { RibbitRandomNotes } from "./modulators/randomnotes.js";
 import { RibbitCV } from "./modulators/cv.js";
@@ -25,6 +32,13 @@ import { createHarmonyContext } from "./harmony.js";
 const PROCESSOR_TYPES = {
     reverb: RibbitReverb,
     delay: RibbitDelay,
+    compressor: RibbitCompressor,
+    saturator: RibbitSaturator,
+    tilt: RibbitTilt,
+    limiter: RibbitLimiter,
+    // A composite of the four above rather than a sixth implementation —
+    // see processors/goodenizer.js.
+    goodenizer: RibbitGoodenizer,
 };
 
 const SYNTH_TYPES = {
@@ -32,6 +46,8 @@ const SYNTH_TYPES = {
     sampler: RibbitSampler,
     percsampler: RibbitPercSampler,
     karplus: RibbitKarplus,
+    granular: RibbitGranular,
+    tapepad: RibbitTapePad,
 };
 
 const MODULATOR_TYPES = {
@@ -199,6 +215,7 @@ export class Ribbit {
         // object; here it covers everything still alive at teardown.
         for (const track of this.tracks) track.source?.dispose?.();
         for (const modulator of this.modulators) modulator.dispose?.();
+        for (const processor of this.processors) processor.dispose?.();
         return this.audioContext.close();
     };
 
@@ -317,6 +334,21 @@ export class Ribbit {
         // forever, disconnected but still alive.
         oldSource.dispose?.();
 
+        // A track's automation can target its synth's params, not just
+        // gain/pan (see commands.js's automate=), and an RibbitAutomationEvent
+        // holds a raw AudioParam reference — so every such event is now
+        // pointing at a param on a synth that no longer exists. Re-aim the
+        // ones the new synth also has (two synths sharing a param name mean
+        // the same thing by it) and drop the rest, rather than leaving the
+        // clock ramping a disconnected node forever.
+        track.automation = track.automation.filter((event) => {
+            if (!event.paramKey || event.paramKey in track.params) return true;
+            const param = newSource.params[event.paramKey];
+            if (!param) return false;
+            event.target = param.audioParam;
+            return true;
+        });
+
         return newSource;
     };
 
@@ -414,6 +446,13 @@ export class Ribbit {
 
         this.processors.splice(index, 1);
         this.clock.removeUnit(processor);
+        // Same duck-typed hook a synth or modulator gets on removal (see
+        // removeTrack/removeModulator). A processor whose params are backed
+        // by ConstantSourceNodes — anything using
+        // RibbitProcessor.createCrossfade — owns running nodes that reach
+        // audioContext.destination through their own muted sinks, so
+        // unwiring it from the chain doesn't stop them.
+        processor.dispose?.();
 
         return true;
     };
@@ -494,13 +533,12 @@ export class Ribbit {
         // A track routes its own name through to its synth's params too
         // (the same fallback channelCommand already uses for a plain
         // `/track_1 cutoff=800` set) — a synth's own params are otherwise
-        // unreachable as a patch destination. No built-in synth declares one
-        // today (oscsynth/sampler are options-only), but this is what makes
-        // the first one that does work without further changes.
+        // unreachable as a patch destination. karplus, percsampler and
+        // granular all declare params that land here.
         const param = object.params?.[paramKey] ?? object.source?.params?.[paramKey];
         if (!param) throw new Error(`unknown param "${paramKey}" on "${objectName}"`);
 
-        return { object, param: param.audioParam };
+        return { object, param };
     };
 
     // Creates one "patch cable": sourceName is any addressable object (a

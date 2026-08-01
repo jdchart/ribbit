@@ -21,6 +21,13 @@ so the console stops offering and stops accepting the name automatically.
 There is no type list in `commands.js`, no `RESERVED_NAMES` entry (that's
 top-level *command* names), and no UI-side registry in `nllc`.
 
+**But check for intra-`src/` imports first** — `grep -rn "processors/<type>"
+src/`. Two exist today: `RibbitGoodenizer` is a composite that constructs
+`RibbitCompressor`/`RibbitSaturator`/`RibbitTilt`/`RibbitLimiter`, and
+`formatReduction` lives in `compressor.js` but is imported by `limiter.js` and
+`goodenizer.js`. These break at import time, not as a clean console error, so
+they belong in step 1 rather than step 2.
+
 ## 2. Trailing references — grep, don't guess
 
 ```sh
@@ -66,11 +73,15 @@ Demo material lives in the host app, not the engine: the
 `src/routes/code-editor/<type>/` route, `static/sessions/<type>-demo.json`, the
 `<a class="session-link">` block in `src/routes/+page.svelte`, route/asset
 listings in `nllc/README.md` and `nllc/docs/{user,dev,llm}/`, and any
-`static/` assets only that type fetched. Two types own a `static/` tree **plus
-a manifest route**, which must go together: `percsampler`
-(`static/samples/` + `routes/samples/manifest.json/`) and `patternvariator`
-(`static/patterns/` + `routes/patterns/manifest.json/`). Stale `.svelte-kit/` references are
-build output and regenerate.
+`static/` assets only that type fetched. Two `static/` trees each have a
+manifest route that must go with them — but **three types read them**, so
+check for another reader before deleting either: `static/samples/` +
+`routes/samples/manifest.json/` serves both `percsampler` and `granular`
+(engine side: `src/samples.js`, dead only when neither remains), and
+`static/patterns/` + `routes/patterns/manifest.json/` serves
+`patternvariator` (`src/pattern.js`). A folder of samples or a pattern pack is
+content, not a type-owned asset, and outlives any one type. Stale
+`.svelte-kit/` references are build output and regenerate.
 
 ## 6. Verify
 

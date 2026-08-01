@@ -60,9 +60,13 @@ params, the same way a processor does (see `docs/llm/building-processors.md`)
 through the track's own name automatically, so `/mytrack cutoff=800 2b`
 works with no `commands.js` change, and they're valid `/patch` destinations
 too (`dest=mytrack.cutoff`, via `_resolveDest`'s `channel.source.params`
-fallback). `synths/percsampler.js` and `synths/karplus.js` are the worked examples —
-the former declares `dynamics`/`pan_spread`/`speed_spread`, the latter
-`damping`/`decay`/`brightness`. Note a synth param needs a real
+fallback). `synths/percsampler.js`, `synths/karplus.js` and `synths/granular.js` are the
+worked examples. A synth param can be ramped, deferred with `at=`, set,
+`/recall`ed, `automate=`d and patched — but **read it with `getModulated()`,
+not `get()`**, in `trigger()`. `get()` returns the intrinsic value and cannot
+see a patch; `getModulated()` taps the summed signal. Since it's read once
+per note, a patch moves the param note by note rather than continuously — a
+fine gesture, just not a smooth sweep. Note a synth param needs a real
 `AudioParam` behind it; if the value has no node of its own, use
 `RibbitParamSources` (`param.js`):
 
@@ -110,22 +114,40 @@ implementing when there's actually something to tear down. `percsampler` and
 `karplus` both implement it, in each case only to tear down their
 `RibbitParamSources` sinks (a one-liner).
 
-Optional: implement `describeState()` returning a short string, and
-`commands.js`'s `paramObjectSummary` will append it to the object's one-line
-summary. It's for state that is neither a param nor an option —
-`RibbitMarkovPercs` uses it to print its generated pattern, since its options
-only describe how that pattern was *derived*.
+Optional: implement `describeState()` returning a short string, and the
+console appends it to the object's one-line summary — `paramObjectSummary`
+for a processor/modulator, `channelSummary` (via `channel.source`) for a
+synth. It's for state that is neither a param nor an option:
+`RibbitMarkovPercs` prints its generated pattern, `RibbitGranular` its source
+recording, length and gain match — the latter because a randomly-chosen
+source is otherwise invisible from the console.
 
-If your synth loads external assets, note the host contract precedent:
-`RibbitPercSampler` fetches a manifest (`/samples/manifest.json`, overridable
-per instance) because a browser can't list a directory, and degrades to an
-empty kit plus a `console.warn` rather than throwing out of a constructor.
+If your synth loads external assets, use **`samples.js`**
+(`fetchSampleManifest`/`resolvedSampleManifest`/`sampleName`/`sampleUrl`)
+rather than fetching yourself — `RibbitPercSampler` and `RibbitGranular` both
+go through it, and it carries the two-level cache (promise + resolved, the
+latter so a live re-roll is synchronous and the console echo is honest) plus
+a URL builder that doesn't over-escape path segments. Host contract:
+`GET /samples/manifest.json` → `{ <folder>: ["<folder>/a.wav", ...] }`; the
+four percussion categories are always present, every other folder is free-form.
 `RibbitPatternVariator` follows the identical shape for `/patterns/manifest.json`
-— keep any third one the same, since a host author should learn one rule.
+via `pattern.js` — keep any third one the same, since a host author should
+learn one rule. Degrade to a `console.warn` and a silent instrument, never a
+throw out of a constructor; a trigger before loading finishes no-ops.
 
-**Polyphony and buffer synthesis.** `synths/karplus.js` is the only polyphonic
-synth (a chord is just several overlapping one-shot `BufferSource`s — no voice
-allocator to run out) and the only one that *synthesizes into an `AudioBuffer`*
+Two conventions for a synth that picks its file at random: an option's
+`get()` reports the **resolved** path (never `random`, or a session wouldn't
+reproduce), and the file is **gain-matched on load** — an unmastered library
+spans tens of dB, so without it every re-roll invalidates the mix.
+`RibbitGranular._measure` peak-normalizes, capped at 20x.
+
+**Polyphony and buffer synthesis.** `synths/karplus.js` and
+`synths/granular.js` are the polyphonic ones (a chord is just several
+overlapping one-shot `BufferSource`s — no voice allocator to run out);
+`granular` is also the example for a synth that schedules *many* nodes per
+note (a whole grain cloud, up front, no timers — share anything common across
+them on one node, and thin rather than truncate when over budget). `karplus`
+is the only one that *synthesizes into an `AudioBuffer`*
 with a JS loop rather than building a node graph. Copy that approach when a
 node graph can't express the algorithm: the specific reason there is that Web
 Audio forces any feedback cycle containing a `DelayNode` to at least one render
