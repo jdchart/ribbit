@@ -55,7 +55,7 @@ Every pattern is a grid of **steps**. What a step *means* depends on `kind`:
 | `kind` | A step is | Drives |
 |---|---|---|
 | `"drums"` | a hit (or not) on each drum category | `percsampler` |
-| `"notes"` | one or more scale degrees, played together | `karplus`, `granular`, `tapepad`, `oscsynth`, anything pitched |
+| `"notes"` | one or more scale degrees, played together | `karplus`, `granular`, `tapepad`, `czsynth`, `oscsynth`, anything pitched (including `chaossynth`, where the degrees select states rather than pitches) |
 
 There is no separate kind for melodies — a melody is a `notes` pattern with one
 degree per step. A chord is the same thing with several.

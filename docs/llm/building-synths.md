@@ -76,6 +76,10 @@ this.params = { cutoff: this._paramSources.create(cutoff, { min: 20, max: 20000 
 dispose() { this._paramSources.dispose(); }
 ```
 
+Always declare `min`/`max`. Besides clamping, a range finite at both ends is
+what makes the param randomizable (`/lead cutoff=random`, and inclusion in the
+bulk `/lead random`); an unbounded param drops out of both.
+
 It handles the Web Audio quirk that makes a bare `ConstantSourceNode`
 unreliable (a node with no path into the rendered graph can have its
 `setValueAtTime` automation silently never reflected in later `.value` reads,
@@ -146,16 +150,57 @@ spans tens of dB, so without it every re-roll invalidates the mix.
 overlapping one-shot `BufferSource`s — no voice allocator to run out);
 `granular` is also the example for a synth that schedules *many* nodes per
 note (a whole grain cloud, up front, no timers — share anything common across
-them on one node, and thin rather than truncate when over budget). `karplus`
-is the only one that *synthesizes into an `AudioBuffer`*
+them on one node, and thin rather than truncate when over budget). `karplus` and `chaossynth`
+*synthesize into an `AudioBuffer`*
 with a JS loop rather than building a node graph. Copy that approach when a
-node graph can't express the algorithm: the specific reason there is that Web
-Audio forces any feedback cycle containing a `DelayNode` to at least one render
-quantum (128 samples) of delay, capping a node-graph Karplus-Strong around
+node graph can't express the algorithm: the specific reason in `karplus` is that
+Web Audio forces any feedback cycle containing a `DelayNode` to at least one
+render quantum (128 samples) of delay, capping a node-graph Karplus-Strong around
 375Hz. Rendering directly is exact at any pitch and — importantly — needs no
 `AudioWorklet` module for the host to serve, which would be a new kind of host
 obligation (the engine only ever asks for JSON manifests). Cost is well under a
 millisecond per note; don't cache the result unless the algorithm is
 deterministic, since a cache makes every repeat of a note bit-identical.
+
+`chaossynth` is the same technique pushed further, and the file to read when
+the algorithm is genuinely per-sample DSP rather than one loop. Three things
+it demonstrates:
+
+- **Two rates in one loop.** The audible path (oscillator → saturator →
+  filter) runs per sample; the expensive control path (an RMS envelope
+  follower, a log, an exp, into the filter cutoff) runs every 64 samples with
+  its coefficient interpolated across the block. That split is what makes the
+  note affordable — and it happens to match the `@hopsize 64` of the Max
+  object being recreated, so it's faithful rather than a shortcut.
+- **Divergence handling.** A feedback loop that produces one NaN poisons every
+  sample after it, and a buffer of NaN is silence plus a click, not a warning.
+  Check for non-finite state at each control block and reset the voice.
+- **Choosing a filter for the modulation rate you actually have.** A biquad
+  recomputing coefficients every 64 samples can go unstable; a Chamberlin
+  state-variable filter doesn't. Substituting one for a Max object is fine —
+  say so in a comment rather than implying an exact port.
+
+`czsynth` is the third, and the one to read for two patterns neither of the
+others has:
+
+- **A preset library, when the state is too big to type.** A CZ tone is three
+  eight-stage envelopes per line — about ninety numbers — so the tone lives in
+  a plain data module (`synths/cz-tones.js`, no host contract) selected by a
+  `preset` option, and every `param` is a *modifier over* it rather than an
+  absolute. The trick that makes the two layers independent: every **other**
+  option accepts the sentinel `"preset"`, meaning "whatever the tone says". So
+  selecting a tone never clobbers an override and an override never needs
+  re-applying, and neither layer writes to the other. Copy that before
+  inventing a scheme where an option's setter reaches into `params`.
+- **An option whose values look numeric can't use `choices`.** The console
+  coerces `1` and `-1` to Numbers before `applyOptions`, whose choices test is
+  a strict `includes()`, so a declared `"1"` never matches. Validate in
+  `set()` instead (as `tapepad`'s `voices`/`bits` and `czsynth`'s
+  `lines`/`octave` do) and accept losing ghost-text completion.
+
+If the cost is more than a millisecond per note, **measure it and write the
+number down** (`chaossynth`: ~5.6ms per 2-second note) and cap the render
+length with a named constant, so a slow tempo and a long note can't allocate
+an unbounded buffer.
 
 Removing a type again later: `docs/llm/removing-types.md`.

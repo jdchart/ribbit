@@ -111,6 +111,11 @@ Points worth noting, all copied from `processors/reverb.js`/`processors/delay.js
   what makes ramping/`at=` deferral work automatically, since both read/write
   `.audioParam` directly via native `setValueAtTime`/`linearRampToValueAtTime`
   calls.
+- **Always give `min`/`max`.** They clamp, and a range finite at both ends is
+  also what makes the param randomizable — `/reverb wet=random` draws from it,
+  and the bulk `/reverb random` includes only params that have one. An
+  unbounded param quietly drops out of both and prints
+  `[no random: unbounded]` in `help`.
 - **A param that has to fan a value out across more than one node** (like
   `RibbitDelay`'s `time`, which writes both `delayL.delayTime` and
   `delayR.delayTime`, the latter offset for stereo width) still fits

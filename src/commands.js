@@ -81,7 +81,13 @@ export function parseCommand(text) {
         // A bare token with no "=" (e.g. "help") is a boolean flag: params.help = true.
         // The duration group only applies inside an "=value" match (nested in
         // that group), so a bare flag can never swallow a following number.
-        const pairPattern = new RegExp(`([a-zA-Z_]\\w*)(?:\\s*=\\s*(${QUOTED_OR_BARE_VALUE})(?:\\s+(${TRAILING_DURATION})(?=\\s|$))?)?`, "g");
+        //
+        // A key may carry one dotted suffix ("cutoff.r") — an *attribute* of
+        // a param rather than the param itself. Only `.r` exists today (see
+        // applyParams), but the grammar is the natural place for the shape,
+        // not a special case buried in one command: without it, "cutoff.r"
+        // isn't a mis-set param, it's a syntax error near ".r".
+        const pairPattern = new RegExp(`([a-zA-Z_]\\w*(?:\\.[a-zA-Z_]\\w*)?)(?:\\s*=\\s*(${QUOTED_OR_BARE_VALUE})(?:\\s+(${TRAILING_DURATION})(?=\\s|$))?)?`, "g");
         let cursor = 0;
         let pair;
         while ((pair = pairPattern.exec(argsText))) {
@@ -117,6 +123,50 @@ export function parseCommand(text) {
 // True for a parsed param carrying a ramp duration (see parseCommand).
 function isRamp(value) {
     return typeof value === "object" && value !== null && "duration" in value;
+};
+
+// The magic value that means "draw one" instead of naming a number — the
+// same word options already use for the same idea (samples=random,
+// seed=random), extended to every rampable param. A ramp spec carries it in
+// `.value`, so `/lead cutoff=random 4b` is "pick a target, then glide there".
+const RANDOM_VALUE = "random";
+
+function isRandom(spec) {
+    return (isRamp(spec) ? spec.value : spec) === RANDOM_VALUE;
+};
+
+// True when anything on this line asked for a draw — which is what turns
+// min=/max= from ordinary (unclaimed) keys into this command's own bounds
+// override. Checked rather than always claiming them so that an object that
+// one day declares a param or option literally named "min" isn't shadowed by
+// a feature it never opted into.
+function hasRandom(input) {
+    return Object.values(input).some(isRandom);
+};
+
+// The optional bounds a line's `=random` draws from, e.g.
+// /lead cutoff=random min=200 max=2000. Line-level rather than per-value:
+// they read as ordinary keys, which is the grammar the rest of the console
+// already has (automate='s from=/to=, add_event's beat=/pitch=), and the cost
+// is that one line's several draws all share one range. Two params wanting
+// different ranges are two lines — cheap, and unambiguous.
+//
+// An omitted end falls back to the param's own declared bound, so min= alone
+// means "anywhere above this" (see RibbitParam.randomValue).
+function randomBounds(input) {
+    return {
+        min: "min" in input ? toNumber(input.min, "min") : undefined,
+        max: "max" in input ? toNumber(input.max, "max") : undefined,
+    };
+};
+
+// Splits a possibly-dotted key ("cutoff.r") into the param it addresses and
+// the attribute of it being set (null for a plain "cutoff"). See parseCommand
+// for why the dot is part of the grammar.
+function splitParamKey(key) {
+    const dot = key.indexOf(".");
+    if (dot === -1) return { name: key, attribute: null };
+    return { name: key.slice(0, dot), attribute: key.slice(dot + 1) };
 };
 
 // Converts a ramp spec's duration to seconds, resolving a "beats" unit
@@ -242,10 +292,18 @@ function formatOptionValue(value) {
 // when a param never declared bounds (e.g. a patch's depth, deliberately
 // unclamped; see RibbitParam's -Infinity/Infinity defaults), since printing
 // "-Infinity..Infinity" would just be noise.
+//
+// A trailing marker appears only for a param the bulk `random` command will
+// *skip*, and says which of the two reasons applies: the flag is off (the
+// user's own doing, and undoable with `<key>.r=true`) or there's no full
+// range to draw from (not undoable — the param would need bounds declared in
+// code). Included params print nothing, since that's the majority and a
+// marker on almost every line stops carrying information.
 function formatParamLine(key, param) {
     const hasRange = Number.isFinite(param.min) || Number.isFinite(param.max);
     const range = hasRange ? ` (range ${param.min}..${param.max})` : "";
-    return `  ${key}=${formatValue(param.get())}${range}`;
+    const random = param.canRandomize ? "" : param.randomizable ? "  [no random: unbounded]" : "  [no random: .r=false]";
+    return `  ${key}=${formatValue(param.get())}${range}${random}`;
 };
 
 // The options counterpart to formatParamLine — a choices-carrying option
@@ -271,31 +329,79 @@ function formatOptionLine(key, option) {
 // object's *entire* param surface, e.g. a processor/modulator) or silently
 // left alone for the caller's own handling (`reportUnknown: false` — e.g.
 // channelCommand, which has plenty of other non-param keys like add_event).
-function applyParams(ribbit, paramsMap, input, { startTime, label }, { reportUnknown = true } = {}) {
+function applyParams(ribbit, paramsMap, input, timing, { reportUnknown = true } = {}) {
+    const { startTime, label } = timing;
+    // Resolved once per line, not per param, so several draws on one line
+    // share the bounds that were typed with them (see randomBounds). Only
+    // read when something actually asked for a draw — otherwise min/max are
+    // just ordinary keys and stay the caller's business.
+    const bounds = hasRandom(input) ? randomBounds(input) : null;
     const results = [];
     for (const [key, spec] of Object.entries(input)) {
         if (key === "at") continue;
-        const param = paramsMap[key];
+        if (bounds && (key === "min" || key === "max")) continue;
+
+        const { name, attribute } = splitParamKey(key);
+        const param = paramsMap[name];
         if (!param) {
-            if (reportUnknown) results.push(`unknown param "${key}"`);
+            if (reportUnknown) results.push(`unknown param "${name}"`);
             continue;
         }
 
+        // `<param>.r=true|false` — an attribute of the param, not a value for
+        // it. Deferred by at= like everything else on the line rather than
+        // applied immediately: a flag is a strange thing to schedule, but
+        // half a line landing on the cycle boundary and half landing now is
+        // exactly the silently-ignored-at= behaviour runAt exists to end.
+        if (attribute !== null) {
+            if (attribute !== "r") {
+                results.push(`unknown attribute "${name}.${attribute}" (only .r — whether "random" includes this param — exists)`);
+                continue;
+            }
+            if (typeof spec !== "boolean") {
+                results.push(`${name}.r takes true or false, not "${isRamp(spec) ? spec.value : spec}"`);
+                continue;
+            }
+            // A param with no range can be flagged in, it just still won't be
+            // drawn (see RibbitParam.canRandomize) — worth saying so now
+            // rather than leaving the user to notice a silent no-op later.
+            const caveat = spec && !param.hasRange ? ` (but ${name} has no declared range, so "random" still skips it — give it min= and max= by name instead)` : "";
+            results.push(runAt(ribbit, timing, `${name}.r=${spec}`, () => {
+                param.randomizable = spec;
+                return `${name}.r=${spec}${caveat}`;
+            }));
+            continue;
+        }
+
+        // A drawn value resolves *here*, at command time — so a deferred
+        // `cutoff=random at=cycle` picks its number now and merely applies it
+        // on the boundary. Same shape as a deferred automate='s from= capture,
+        // and it's what lets the echo report the actual number rather than
+        // promising one.
+        let drawn;
+        if (isRandom(spec)) {
+            drawn = param.randomValue(bounds);
+            if (drawn === null) {
+                results.push(`${name} has no declared range — give min= and max= to randomize it`);
+                continue;
+            }
+        }
+
         if (isRamp(spec)) {
-            const target = param.clamp(toNumber(spec.value, key));
+            const target = drawn ?? param.clamp(toNumber(spec.value, key));
             const seconds = rampSeconds(ribbit.clock, spec);
             scheduleRamp(ribbit.audioContext, param.audioParam, param.audioParam.value, param.encode(target), seconds, { startTime });
-            results.push(`${key} ramping to ${formatValue(target)} over ${seconds.toFixed(2)}s${label ? ` (${label})` : ""}`);
+            results.push(`${name} ramping to ${formatValue(target)} over ${seconds.toFixed(2)}s${label ? ` (${label})` : ""}`);
         } else {
-            const target = param.clamp(toNumber(spec, key));
+            const target = drawn ?? param.clamp(toNumber(spec, key));
             if (startTime !== undefined) {
                 // Same raw-AudioParam route the ramp branch uses, so a plain
                 // set can also be deferred to at=beat/at=cycle.
                 setInstant(ribbit.audioContext, param.audioParam, param.encode(target), startTime);
-                results.push(`${key}=${formatValue(target)} (${label})`);
+                results.push(`${name}=${formatValue(target)} (${label})`);
             } else {
                 param.set(target);
-                results.push(`${key}=${formatValue(target)}`);
+                results.push(`${name}=${formatValue(target)}`);
             }
         }
     }
@@ -362,7 +468,49 @@ function compositeClaimedKeys(params) {
     const claimed = new Set();
     if (params.add_event) for (const key of ["beat", "pitch", "degree", "velocity", "duration"]) claimed.add(key);
     if ("automate" in params) for (const key of ["from", "to", "beat", "duration", "curve", "once"]) claimed.add(key);
+    // Same story for a `=random` line's bounds — see randomBounds.
+    if (hasRandom(params)) for (const key of ["min", "max"]) claimed.add(key);
     return claimed;
+};
+
+// The bulk `/<object> random`: draws a fresh value for every param that is
+// both flagged in and actually drawable (see RibbitParam.canRandomize), by
+// handing applyParams a synthesized "everything=random" input rather than
+// re-implementing the set/ramp/at= branching a second time. So a bulk roll
+// ramps and defers to at=beat|cycle exactly like a single one, for free.
+//
+// `spec` is whatever `random` was given as. A bare flag (true) rolls
+// instantly; a duration — `/lead random=4b`, `/lead random=3` — glides every
+// drawn param to its new value over that long. The duration rides the value
+// here rather than trailing the token the way `cutoff=random 4b` does,
+// because the trailing-duration grammar only attaches to a "key=value" pair
+// and `random` is a bare flag: there is nothing for "/lead random 4b" to
+// parse the 4b as.
+//
+// Params only — an object's *options* are discrete settings (a waveform, a
+// sample pack, a seed) with no `.r` flag and no range, and folding them in
+// would make one word mean two different kinds of change. Options already
+// have their own random where it makes sense (seed=random, samples=random).
+function randomizeAll(ribbit, paramsMap, spec, timing) {
+    const keys = Object.keys(paramsMap).filter((key) => paramsMap[key].canRandomize);
+    if (!keys.length) {
+        return [`nothing to randomize — no param here has both a declared range and .r=true (see "help")`];
+    }
+
+    let value = RANDOM_VALUE;
+    if (spec !== true) {
+        const raw = isRamp(spec) ? String(spec.value) : String(spec);
+        if (!/^\d+(?:\.\d+)?b?$/.test(raw)) {
+            return [`random takes no value, or a ramp duration — e.g. "random", "random=3" (3s), "random=4b" (4 beats)`];
+        }
+        const { amount, unit } = parseDuration(raw);
+        value = { value: RANDOM_VALUE, duration: amount, unit };
+    }
+
+    // No min=/max= here on purpose: a bulk roll spans params with wildly
+    // different units (a cutoff in Hz next to a 0-1 blend), so one shared
+    // range is meaningless. Each param uses its own declared bounds.
+    return applyParams(ribbit, paramsMap, Object.fromEntries(keys.map((key) => [key, value])), timing);
 };
 
 const AUTOMATION_CURVES = ["linear", "exponential", "target"];
@@ -501,7 +649,10 @@ function channelHelp(ribbit, channel) {
     }
 
     lines.push("", "commands:");
-    lines.push("  gain=<val> / pan=<val>          set instantly; add a trailing duration to ramp, e.g. gain=0 3 (3s) or gain=0 4b (4 beats)");
+    lines.push("  gain=<val> / pan=<val>           set instantly; add a trailing duration to ramp, e.g. gain=0 3 (3s) or gain=0 4b (4 beats)");
+    lines.push("  <param>=random [min= max=]       draw one value in the param's range (or between min= and max=); ramps and defers like any other value, e.g. cutoff=random 4b at=cycle");
+    lines.push("  random [=<duration>]             draw a new value for EVERY param above that isn't marked [no random] — this channel's and its synth's; random=4b glides there instead of jumping");
+    lines.push("  <param>.r=true|false             include/exclude one param from that bulk random (saved with the session)");
     lines.push("  at=beat|cycle                    defer ANY command on this line — a set, a ramp, or a discrete change like start/stop/synth=/an option — to the next beat/loop boundary instead of firing now");
     if (channel.source) {
         lines.push(`  synth=<type>                     swap this track's synth (${ribbit.synthTypes.join(", ")})`);
@@ -563,6 +714,7 @@ const CHANNEL_COMMAND_KEYS = new Set([
     "automate", "from", "to", "curve", "once",
     "automations", "remove_automation", "clear_automation",
     "add_processor", "remove_processor", "remove_self", "help",
+    "random", "min", "max",
 ]);
 
 function channelCommand(ribbit, channel, params) {
@@ -596,6 +748,16 @@ function channelCommand(ribbit, channel, params) {
     if (channel.source) {
         results.push(...applyParams(ribbit, channel.source.params, params, timing, { reportUnknown: false }));
         results.push(...applyOptions(ribbit, channel.source, params, timing, claimed));
+    }
+
+    // Roll every flagged param on this channel *and* its synth in one gesture
+    // — addressableParams for the same reason automate= uses it: a track's
+    // synth params are part of the track's surface, and "randomize this
+    // track" that skipped the instrument would be answering a different
+    // question. Placed after the explicit sets above so an explicit value on
+    // the same line wins the last word over a drawn one.
+    if ("random" in params) {
+        results.push(...randomizeAll(ribbit, addressableParams(channel), params.random, timing));
     }
 
     if ("out" in params) {
@@ -841,9 +1003,14 @@ function channelCommand(ribbit, channel, params) {
     // any surface this command routes to claims it: the channel's params,
     // its synth's params/options, or the command keywords themselves.
     for (const key of Object.keys(params)) {
-        const knownOnSynth = channel.source && (key in channel.source.params || key in channel.source.options);
-        if (!(key in channel.params) && !knownOnSynth && !CHANNEL_COMMAND_KEYS.has(key)) {
-            results.push(`unknown param "${key}"`);
+        // A dotted key ("cutoff.r") is known if its *param* is — the
+        // attribute half is applyParams' business to validate, and it does
+        // (an unknown attribute reports itself there rather than as a
+        // mysteriously unknown param).
+        const { name } = splitParamKey(key);
+        const knownOnSynth = channel.source && (name in channel.source.params || name in channel.source.options);
+        if (!(name in channel.params) && !knownOnSynth && !CHANNEL_COMMAND_KEYS.has(key)) {
+            results.push(`unknown param "${name}"`);
         }
     }
 
@@ -886,6 +1053,9 @@ function paramObjectHelp(ribbit, object) {
 
     lines.push("", "commands:");
     lines.push("  <param>=<val>                    set instantly; add a trailing duration to ramp, e.g. wet=0.5 3 (3s) or wet=0.5 4b (4 beats)");
+    lines.push("  <param>=random [min= max=]       draw one value in the param's range (or between min= and max=); ramps and defers like any other value, e.g. wet=random 4b at=cycle");
+    lines.push("  random [=<duration>]             draw a new value for EVERY param above that isn't marked [no random]; random=4b glides there instead of jumping");
+    lines.push("  <param>.r=true|false             include/exclude one param from that bulk random (saved with the session)");
     lines.push("  at=beat|cycle                    defer ANY command on this line — a set, a ramp, or a discrete change like start/stop/synth=/an option — to the next beat/loop boundary instead of firing now");
     lines.push("  automate=<param> to= [from= beat= duration= curve= once]   add loop-position automation (beats, repeats every loop unless once)");
     lines.push("  automations / remove_automation=<n> / clear_automation     list (with indices) / remove one / remove all");
@@ -907,6 +1077,7 @@ const PARAM_OBJECT_COMMAND_KEYS = new Set([
     "at", "remove_self", "help",
     "automate", "from", "to", "beat", "duration", "curve", "once",
     "automations", "remove_automation", "clear_automation",
+    "random", "min", "max",
 ]);
 
 // Shared by processorCommand and modulatorCommand: both are addressed by
@@ -935,6 +1106,10 @@ function paramObjectCommand(ribbit, object, params, removeSelf) {
     results.push(...applyParams(ribbit, object.params, params, timing, { reportUnknown: false }));
     results.push(...applyOptions(ribbit, object, params, timing, compositeClaimedKeys(params)));
 
+    if ("random" in params) {
+        results.push(...randomizeAll(ribbit, object.params, params.random, timing));
+    }
+
     if ("automate" in params) {
         results.push(...addAutomationCommand(ribbit, object, object.params, params, timing));
     }
@@ -948,8 +1123,9 @@ function paramObjectCommand(ribbit, object, params, removeSelf) {
     }
 
     for (const key of Object.keys(params)) {
-        if (!(key in object.params) && !(key in (object.options ?? {})) && !PARAM_OBJECT_COMMAND_KEYS.has(key)) {
-            results.push(`unknown param "${key}"`);
+        const { name } = splitParamKey(key); // see channelCommand's copy of this check
+        if (!(name in object.params) && !(name in (object.options ?? {})) && !PARAM_OBJECT_COMMAND_KEYS.has(key)) {
+            results.push(`unknown param "${name}"`);
         }
     }
 
@@ -997,21 +1173,34 @@ const CHANNEL_ACTION_KEYWORDS = [
     "synth=", "add_processor=", "remove_processor=", "out=", "add_send=",
     "remove_send=", "send=", "at=",
     "automate=", "automations", "remove_automation=", "clear_automation",
+    "random", "min=", "max=",
     "remove_self", "help",
 ];
 
 // Same idea for processor/modulator commands beyond their own params.
 const PARAM_OBJECT_ACTION_KEYWORDS = [
     "at=", "automate=", "automations", "remove_automation=",
-    "clear_automation", "remove_self", "help",
+    "clear_automation", "random", "min=", "max=", "remove_self", "help",
 ];
+
+// Every param key is suggestible twice — as itself and as its `.r` flag. The
+// pair is generated rather than listed so a new param can't have a settable
+// flag the console won't complete; the flag form sorts after the plain one
+// simply by being emitted second, which is the order that matters since
+// pickBestMatch takes the first prefix hit ("cut" → "cutoff=", not "cutoff.r=").
+function paramKeywords(paramsMap) {
+    return [
+        ...Object.keys(paramsMap).map((key) => `${key}=`),
+        ...Object.keys(paramsMap).map((key) => `${key}.r=`),
+    ];
+};
 
 function channelKeywordsFor(channel) {
     return [
-        ...Object.keys(channel.params).map((key) => `${key}=`),
+        ...paramKeywords(channel.params),
         // A track's synth's params/options are addressable off the channel
         // (see channelCommand), so they're suggestible there too.
-        ...Object.keys(channel.source?.params ?? {}).map((key) => `${key}=`),
+        ...paramKeywords(channel.source?.params ?? {}),
         ...Object.keys(channel.source?.options ?? {}).map((key) => `${key}=`),
         ...CHANNEL_ACTION_KEYWORDS,
     ];
@@ -1019,7 +1208,7 @@ function channelKeywordsFor(channel) {
 
 function paramObjectKeywordsFor(object) {
     return [
-        ...Object.keys(object.params).map((key) => `${key}=`),
+        ...paramKeywords(object.params),
         ...Object.keys(object.options ?? {}).map((key) => `${key}=`),
         ...PARAM_OBJECT_ACTION_KEYWORDS,
     ];
@@ -1044,7 +1233,10 @@ const TOP_LEVEL_KEYWORDS = {
     clock: ["bpm=", "num_beats=", "at="],
     harmony: ["root=", "scale=", "at="],
     add_modulator: ["type=", "name="],
-    patch: ["source=", "dest=", "depth=", "id=", "at="],
+    // min=/max= only mean anything alongside depth=random on an existing
+    // patch (a patch's depth is deliberately unbounded, so a draw there has
+    // no range of its own to fall back on — see RibbitParam.randomValue).
+    patch: ["source=", "dest=", "depth=", "id=", "min=", "max=", "at="],
     unpatch: ["id=", "at="],
     save: ["name=", "at="],
     recall: ["name=", "at="],
@@ -1135,6 +1327,17 @@ function resolveValueCandidates(ribbit, commandName, resolvedObject, key) {
         ? resolvedObject
         : resolvedObject?.source?.options?.[key] ? resolvedObject.source : null;
     if (optionOwner) return optionOwner.options[key].choices ?? null;
+
+    // A param's own value is open-ended (a number) with exactly one
+    // enumerable member — "random" — and its `.r` flag is a plain boolean.
+    // Suggesting them is what makes the feature discoverable from the
+    // keyboard rather than only from `help`. Last, so a key that is both a
+    // param name and something more specific above keeps the specific answer.
+    if (resolvedObject?.params) {
+        const params = addressableParams(resolvedObject);
+        const { name, attribute } = splitParamKey(key);
+        if (params[name]) return attribute === "r" ? ["true", "false"] : attribute === null ? [RANDOM_VALUE] : null;
+    }
 
     return null;
 };

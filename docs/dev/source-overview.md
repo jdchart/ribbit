@@ -31,7 +31,16 @@ own params, a modulator's own params, a patch's `depth`. Wraps a single raw
   user-facing 0–1 position is exponentially tapered via `taper.js` onto the
   underlying gain value; everything else defaults to identity).
 - optional `min`/`max` — clamped by `.clamp(value)` (channel gain/pan use
-  this; processor/modulator params default to unclamped).
+  this; processor/modulator params default to unclamped). These also decide
+  whether the param can be *randomized*: `.hasRange` is true only when both
+  ends are finite, and `.randomValue({ min, max })` returns `null` otherwise
+  rather than inventing a span. Only three params in the engine are unbounded
+  enough to fail that — a patch's `depth`, `cv`'s `value`, a send's `gain`.
+- optional `randomizable` (default `true`) — whether the bulk `/<object>
+  random` command includes this param, surfaced on the console as
+  `<param>.r=true|false` and persisted by `session.js` as `no_random`.
+  `.canRandomize` is the two conditions together. Channel `gain` is the only
+  thing in the engine that ships with it off.
 - optional `onSet` — overrides the instant-set path for a param that has to
   fan a single value out across more than one node (`RibbitDelay`'s `time`
   writes both `delayL.delayTime` and `delayR.delayTime`, the latter offset for
@@ -103,9 +112,15 @@ second implementation.
 
 ## `random.js`
 
-`mulberry32(seed)` — a 32-bit seeded PRNG, and `randomSeed()` — a fresh
+`mulberry32(seed)` — a 32-bit seeded PRNG; `randomSeed()` — a fresh
 unreproducible seed, which is what `seed=random` resolves to before being
-stored as a concrete number.
+stored as a concrete number; and `randomInRange(min, max)` — one uniform draw,
+what a param's `=random` resolves to (see `RibbitParam.randomValue`).
+
+`randomInRange` uses `Math.random()` for the same reason `randomSeed()` does,
+and it is not the exception to the rule below: the draw resolves to a concrete
+number the moment the command runs, and *that number* is what gets stored, so
+the result is already part of the document with nothing left to reproduce.
 
 Seedability is why a generated pattern survives a session round trip: `seed`
 plus the generator's shape options fully determine the output, so a saved
@@ -331,7 +346,7 @@ replayed, since regenerating N times for cycles nobody will hear is strictly
 worse than landing on the current one. `_notifiedCycle` tracks the high-water
 mark and resets to `-1` in `start()`, so a restart re-announces cycle 0.
 
-**Nothing currently implements it.** All four generators index `generateEvents`
+**Nothing currently implements it.** All five generators index `generateEvents`
 straight off the absolute step number, which sidesteps needing a boundary
 notification at all, and `RibbitPatternVariator` regenerates only on reseed by
 deliberate design. It's an unused seam rather than dead code — the natural
@@ -604,6 +619,142 @@ sources run forever once started, and `removeTrack`/`setTrackSynth` only do a
 generic `output.disconnect()`. The same persistence means hiss is audible while
 the track is stopped — `active` gates event scheduling, not audio, and a tape
 machine hissing through a pause is the intended behaviour.
+
+## `synths/chaossynth.js` — `RibbitChaosSynth extends RibbitSynth`
+
+A chaotic two-voice cross-coupled feedback synthesizer, recreated from the
+`p "chaotic synthesiser"` subpatcher in `.claude/context/regression.maxpat`
+(where a `fluid.mlpregressor~` predicted its ten inputs from a 2D pad). The
+second synth to **render per note into an `AudioBuffer`** rather than build a
+node graph, and the first whose algorithm is genuinely per-sample DSP rather
+than one loop over a delay line.
+
+**The topology, per voice:** a sine oscillator whose frequency is bent by the
+*other* voice's last output sample, through an `atan` saturator, into a
+resonant lowpass whose cutoff is derived from that voice's own loudness. Two
+nested feedback loops — the inner one negative and per voice (louder closes
+the filter, which makes it quieter, which opens it again, so it hunts rather
+than settling), the outer one between the voices and acting on frequency.
+
+Things worth knowing before changing it:
+
+- **Both loops are single-sample, and that's why it can't be a node graph.**
+  Web Audio forces any graph cycle to a full render quantum; 128 samples of lag
+  in the cross coupling makes it a *different* dynamical system, not a slightly
+  worse one. The envelope follower in the inner loop has no node equivalent at
+  all. (Max's own `send~`/`receive~` imposes a signal vector here; a single
+  sample is the ideal version of the same connection.)
+- **Two rates in one loop.** The audible path runs per sample; the loudness →
+  cutoff path runs every `CONTROL_HOP` (64) samples with its filter coefficient
+  interpolated across the block. That split keeps a log and an exp per voice
+  out of the inner loop, and it is also exactly the original's control rate
+  (`fluid.loudness~ @hopsize 64`) — faithful, not a shortcut.
+- **Two documented substitutions.** `lores~` → a Chamberlin state-variable
+  filter, because a biquad recomputing coefficients every 64 samples can go
+  unstable and an SVF doesn't. `fluid.loudness~` → a one-pole RMS follower
+  (~20ms) read at the same hop; smoother than a windowed loudness measure,
+  which is what this loop wants.
+- **Divergence is checked, not hoped for.** One NaN in a feedback loop poisons
+  every sample after it, and a buffer of NaN is silence plus a click rather
+  than a warning, so each control block resets a voice whose state has gone
+  non-finite.
+- **The output clip does real work.** `atan` bounds what reaches the filter,
+  but a resonant lowpass has gain at its cutoff: measured peak with all ten
+  inputs at 1 is exactly 1.0, versus ~0.35 at the defaults. Distorting at the
+  top of the range beats a gain stage that makes every ordinary setting
+  quieter.
+- `MAX_NOTE_SECONDS` (8) caps the render. Measured ~5.6ms per 2-second note —
+  well over `karplus`'s, and the reason the cap exists.
+
+**`seed` → per-note state** is the other half of the design. `_stateTable()`
+lazily builds 128 rows of ten uniform draws from one `mulberry32(seed)` stream,
+thrown away whenever the seed changes; `_resolveState(midi, modulated)` lerps
+each param toward that note's row by `spread`. So a MIDI note selects a
+*configuration*, not a pitch, and any event generator becomes a timbre
+sequencer. The `modulated` flag follows `RibbitParam`'s own split:
+`trigger()` passes `true` (a patch should be seen), `describeState()` passes
+`false`, because a patched param's summed value is only readable while the
+graph is rendering and a `/track` typed before `/start` would otherwise print
+`0.00` for exactly the params someone had bothered to patch.
+
+`dispose()` is the usual one-liner for `RibbitParamSources`; there are no
+persistent audio nodes.
+
+## `synths/czsynth.js` — `RibbitCZSynth extends RibbitSynth`
+
+An emulation of the Casio CZ-101 (1984) — phase distortion. The third synth to
+**render per note into an `AudioBuffer`**, and the clearest case for it: the
+algorithm is a per-sample nonlinearity whose *shape* is being moved by an
+envelope. `WaveShaperNode` reshapes amplitude, not phase, from a fixed
+`Float32Array`; there is no node arrangement that expresses a moving transfer
+function, and the alternative is an `AudioWorklet` module the host would have
+to serve.
+
+**The algorithm.** A linear phase ramp `φ ∈ [0,1)` is bent by a
+piecewise-linear transfer function, then read out of a cosine table.
+`distortedPhase()` holds one function per waveform; the DCW envelope morphs
+each between the identity (which reads out an undistorted cosine — so DCW 0 is
+a sine for *every* waveform) and its fully bent shape. `resonanceWindow()`
+handles the three that work differently. Architecture is the machine's: up to
+two lines, each `DCO → DCW → DCA` with an eight-stage envelope on all three.
+
+Things worth knowing before changing it:
+
+- **The cosine table needs two guard entries, not one.** Every distortion
+  function except the saw *clamps* to a phase of exactly 1.0 — the flat top of
+  a pulse lands there every period — so the interpolation reads index
+  `TABLE_SIZE + 1`. With one guard entry those four waveforms render as NaN.
+  This was a real bug, found by rendering rather than by reading.
+- **The resonant waveforms are not phase distortion.** They are an inner sine
+  hard-synced to the note, multiplied by a per-cycle window (saw / triangle /
+  trapezoid), so `dcw` moves a *frequency* there. Casio named them after the
+  window, which is why the manual is misleading.
+- **Envelopes are flattened before the render, not stepped through modes.**
+  `buildEnvelope()` collapses the eight `[rate, level]` stages plus the sustain
+  point into one linear segment list, using the gate length — which is known up
+  front. That covers the case that gives the electric pianos their character,
+  where the key is released long before the attack finishes and the release
+  ramps from wherever the level had got to.
+- **One line at a time, not all lines per sample.** Measured ~5× faster: it
+  puts every piece of a line's state in a local and keeps the sample loop free
+  of an inner iteration. Both ways of combining lines are per-sample
+  commutative, so the first writes and the rest add (or multiply, for ring).
+- **`OUTPUT_TRIM` is exact, not a guess.** These waveforms are peak-to-peak 2
+  by construction, but the DC-heavy ones (pulse, doublesine) sit pinned at a
+  rail, so their peak *from zero* after the DC blocker is 2. Untrimmed, stock
+  presets ran from 0.68 to 1.99 and half of them clipped at velocity 1.
+- **The DC blocker is faithful, not a patch.** The hardware's output stage is
+  AC-coupled and never passes the offset either; without it the DCA envelope
+  turns that offset into a thump on every note.
+- **`fullSpanSeconds()` is a fitted curve.** Casio published the 0..99 rate
+  scale but never its meaning in seconds, and no teardown has recovered it.
+  The two anchors were chosen by working backwards from the shipped tones. If
+  it ever needs re-fitting, that is the honest way to do it — and `env_time`
+  exists so a user never has to.
+- `MAX_NOTE_SECONDS` (12) caps the render, generous because a CZ note *is* its
+  release. Cost is ~0.35ms per second of audio per line.
+
+**Options carry a `preset` sentinel.** Every option but `preset` accepts the
+literal string `"preset"`, meaning "whatever the tone says", which is what
+keeps the preset layer and the override layer from writing to each other.
+`lines` and `octave` deliberately declare **no `choices`** — the console
+coerces numeric-looking values to Numbers before `applyOptions`, whose choices
+test is a strict `includes()`, so a declared `"1"` can never match a typed `1`.
+Same reason `tapepad`'s `voices` and `bits` validate in `set()`.
+
+## `synths/cz-tones.js` — the preset data
+
+Twenty-eight Boards of Canada patches decoded from the Casio sysex dumps in
+`.claude/context/Casio CZ 101/syx/`, one folder per record. Plain data, no host
+contract — nothing at runtime reads the `.syx` files.
+
+A single-tone dump is 264 bytes: seven of header, 256 of payload transmitted as
+half-bytes (low nibble first), then `F7`. The payload joins back into 128 bytes
+laid out in 25 fixed-length sections. The file's header comment carries the
+field-by-field meaning; the decode is self-checking, which is why it can be
+trusted — `a03-square-lead` comes back as wave code 1 (square) and
+`sixtyniner-sine-pad` as a saw-pulse whose DCW envelope terminates at level
+zero, which in phase distortion is exactly a sine.
 
 ## `processor.js` — `RibbitProcessor` (base)
 
@@ -1014,6 +1165,68 @@ seeded `random()` in a **fixed order**, since reproducibility across a
 save/load depends on the draw sequence being deterministic; inserting a
 conditional draw mid-sequence changes every take after it.
 
+## `modulators/chorale.js` — `RibbitChorale extends RibbitModulator`
+
+The fifth generator, and the only one that isn't making a rhythm: sustained,
+overlapping voices moving through a chord progression in a mode. Drives any
+polyphonic synth (`tapepad`, `karplus`, `granular`), emitting `degree` so the
+harmony context still resolves the key.
+
+The organizing property, and the thing to preserve when editing: **there is no
+state and no randomness**. Every note is a pure function of the absolute beat,
+`MODES`, and the options — no seed, no cursor, no `onClockStart()`, and
+nothing to reproduce across a save/load. Two consequences worth knowing before
+changing anything here: it realigns by itself after a `/stop` `/start` (like
+`markovpercs`/`euclidpercs`, unlike `randomnotes`), and a skipped lookahead
+window costs one window of notes rather than desynchronising it permanently.
+
+Two independent clocks, deliberately not locked to each other:
+
+- the **chord clock** — `floor(beat / chord_beats)` indexes `progression`;
+- the **voice clock** — voice `v` attacks at `k * note_beats + offset_v`,
+  where `offset_v` spreads the voices across one period by `stagger`.
+
+Because a voice takes whatever chord is current at *its own* attack time, a
+voice that attacked before a chord change holds its old note across it. That
+overhang is the suspensions, and it's the reason `note_beats` and
+`chord_beats` are not derived from one another.
+
+Continuity comes from `overlap`: a note's `duration` is
+`note_beats * (1 + overlap)`, so each voice crossfades with itself rather than
+gapping. The synth's own release runs on past that and the two stack.
+
+**Voice leading is positional, not remembered** — the technique worth copying.
+Each voice has a fixed register anchor (`v / (voices - 1) * spread * 12`) and
+always takes chord tone `v % chord_size`, octave-placed nearest that anchor by
+`tone + 12 * round((anchor - tone) / 12)`. That yields a fully voiced chord
+where each voice moves the smallest interval keeping it in its own register —
+the musical result a remembered previous-note approach would give, without the
+cursor state that would cost. `transpose` is applied last, after the octave
+placement, so it shifts a finished voicing rather than changing which octave
+each tone lands in.
+
+Chord building (`_chordDegrees`) stacks `chord_size` tones `stack` mode-steps
+apart, carrying the octave whenever the walk runs off the top of the mode —
+which is why `pentatonic` (5 notes) and `wholetone` (6) need no special case
+and produce quartal/augmented stacks for free.
+
+Param/option split: `velocity`/`note_beats`/`overlap`/`spread`/`stagger` are
+params (all bounded at both ends, so all randomizable and all valid `/patch`
+destinations); `mode`/`progression`/`chord_size`/`stack`/`chord_beats`/
+`transpose`/`voices` are options. `chord_beats` is the interesting call — it
+*is* read fresh, but a ramp on it would renumber every chord boundary
+underneath the music rather than slowing the progression, so it's an option.
+`progression` parses through `harmony.js`'s shared `parseDegreeList`.
+
+A param is read when a voice **attacks**, not continuously, so a ramp or patch
+on `spread` arrives voice by voice as each re-enters — the pad revoices itself
+over a cycle rather than sliding. Read them with `getModulated()`, as every
+generator must.
+
+`describeState()` prints the whole progression as actually voiced. It can,
+because the voicing is a pure function with no clock state to consult — which
+the other generators' `describeState()` implementations cannot claim.
+
 ## `patch.js` — `RibbitPatch` / `RibbitEventPatch`
 
 `RibbitPatch`: one continuous "patch cable" — connects a source object's
@@ -1058,15 +1271,18 @@ call, including resolving `at=beat`/`at=cycle` against the clock.
 `toNumber(raw, label)` converts a parsed value to a number, *throwing* (not
 returning `NaN`) if it isn't finite — this is what turns a bad numeric param
 into a clean caught error instead of silently writing `NaN` into persistent
-engine state (e.g. `clock.bpm`). `setInstant(audioContext, param, value,
+engine state (e.g. `clock.bpm`). `splitParamKey(key)` splits the one dotted
+key shape the grammar allows (`cutoff.r`) into a param name and an attribute;
+`isRandom`/`hasRandom`/`randomBounds` recognize the literal value `random` and
+the line-level `min=`/`max=` that narrow it. `setInstant(audioContext, param, value,
 startTime)` writes a value onto an `AudioParam` via
 `cancelScheduledValues`+`setValueAtTime` rather than a direct `.value =`
 assignment, so a deferred (`at=`) *instant* set is possible, not just a
 deferred ramp.
 
-`applyParams(nllc, paramsMap, input, { startTime, label }, { reportUnknown })`
-is the one function that knows how to get/set/ramp/defer any `RibbitParam` (see
-`param.js`) against a parsed command value — shared by `channelCommand`
+`applyParams(nllc, paramsMap, input, timing, { reportUnknown })`
+is the one function that knows how to get/set/ramp/defer/randomize any
+`RibbitParam` (see `param.js`) against a parsed command value — shared by `channelCommand`
 (gain/pan plus a track's synth's params), `paramObjectCommand` (every
 processor/modulator param), and the `/patch` command (depth), replacing what
 used to be three separate hand-rolled copies of the same
@@ -1077,6 +1293,13 @@ validating against `choices`), with `exclude` = `compositeClaimedKeys(params)`
 so a composite command's generic keys (`automate=`'s `duration=`, say) don't
 also hit a same-named option (reverb's `duration`). It takes `timing` because
 an option, while never rampable, *is* schedulable — see `runAt` below.
+
+`randomizeAll(nllc, paramsMap, spec, timing)` is the bulk `/<object> random`.
+It doesn't reimplement anything: it filters `paramsMap` by `.canRandomize` and
+hands `applyParams` a synthesized `{ key: "random", ... }` input, so a bulk
+roll ramps (`random=4b`) and defers (`at=cycle`) by the same code path a
+single one does. Params only — options have no range and no `.r` flag, and the
+ones worth re-rolling already have their own (`seed=random`).
 
 `runAt(nllc, { startTime, label }, pending, fn)` is the third scheduling
 path, and the one that makes `at=` universal: it runs `fn` now, or defers it
@@ -1279,6 +1502,13 @@ instance rather than holding any state of their own:
   `patch.params.depth` before reading it, rather than assuming every patch is
   shaped like a regular `RibbitPatch` — same guard `reconcilePatches` below
   needs).
+  Each `params` block is accompanied by an optional sibling `no_random` array
+  (`serializeNoRandom`) listing the params whose `.r` flag is off, so which
+  params a bulk `random` touches survives a round trip. It records the whole
+  excluded set rather than a diff against class defaults, and `applyNoRandom`
+  only runs when the key is actually present — a session file written before
+  `no_random` existed keeps each class's own defaults instead of having them
+  all switched on.
   `sessionToJSON` adds a `version`, `nllc.states` (see `/save` below), and
   the session's `readme` on top of the same shape `snapshotSession` returns.
   The readme is deliberately *only* on `sessionToJSON`: it describes the

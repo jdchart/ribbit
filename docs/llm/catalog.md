@@ -15,7 +15,9 @@ Conventions used below:
 - **options** are discrete settings with no `AudioParam` behind them. They
   **cannot be ramped**, but — like every other command — they **can be
   scheduled** with `at=beat` / `at=cycle` (`/rhy seed=20 at=cycle`).
-- A range in brackets is the param's clamp. Options list their `choices` where
+- A range in brackets is the param's clamp. It doubles as the range
+  `<param>=random` draws from, and having one at both ends is what qualifies a
+  param for the bulk `/<object> random`. Options list their `choices` where
   they have a fixed set.
 
 Registered in `src/ribbit.js` (`SYNTH_TYPES` / `PROCESSOR_TYPES` /
@@ -24,7 +26,7 @@ Registered in `src/ribbit.js` (`SYNTH_TYPES` / `PROCESSOR_TYPES` /
 
 ---
 
-## Synths (6)
+## Synths (8)
 
 A synth makes sound and is owned by a track (`/add_track synth=<type>`). Its
 params and options are addressed through the track's name — the synth is not
@@ -130,6 +132,106 @@ that the summed chord runs through. Built for slow, warped, lofi chords.
   it needs an `AudioWorklet` module for the host to serve, and the engine only
   ever asks hosts for JSON manifests.
 
+### `chaossynth` — `src/synths/chaossynth.js`
+A chaotic two-voice cross-coupled feedback synthesizer, recreated from the
+"chaotic synthesiser" subpatcher in `.claude/context/regression.maxpat` (where
+a `fluid.mlpregressor~` predicted its ten inputs from a 2D pad). Two sine
+oscillators, each driven through an `atan` saturator into a resonant lowpass,
+with **two nested feedback loops**: per voice the filter's cutoff is driven by
+that voice's own loudness (louder = darker, so it hunts rather than settles),
+and between the voices each oscillator's pitch is bent at audio rate by the
+other's filtered output. Renders per note into an `AudioBuffer` like `karplus`,
+for a sharper version of the same reason — both loops are single-sample and a
+Web Audio cycle is forced to 128, which makes it a *different* dynamical
+system, and the envelope follower has no node equivalent at all. Polyphonic
+(each trigger is its own chaotic system). Voice A is the left channel, voice B
+the right.
+
+**A MIDI note selects a state, not a pitch.** `seed` builds one configuration
+of all ten inputs per MIDI note (0..127); playing note 60 always selects
+configuration 60. So any note generator becomes a way to sequence *timbres* —
+this is the only synth where that's the intended use.
+
+- **params** — the ten control points, all [0..1] because that is what the
+  original patch's multislider was, each scaled internally:
+  `a_cross`/`b_cross` (how hard the other voice FMs this one — the chaos knob),
+  `a_drive`/`b_drive` (0..50dB into the saturator), `a_pitch`/`b_pitch` (base
+  pitch, mapped onto MIDI 0..69), `a_res`/`b_res` (resonance, ×0.96),
+  `a_track`/`b_track` (how much the voice's own loudness closes its filter).
+  Plus `spread` [0..1] (lerp from the params toward the note's seeded state:
+  0 = params only and every note identical, 1 = the seeded state outright),
+  `pitch_track` [0..1] (how much the note *also* transposes both voices, in
+  semitones — 0 makes a note a pure index), `attack` [0..2] s,
+  `release` [0.005..4] s
+- **options** — `seed` (or `random`), `output` (stereo, mono, a, b — `a`/`b`
+  put one voice on both channels, the fastest way to hear which half of a
+  state does what)
+- **also** — `describeState()` prints the seed and the ten values note 60
+  resolves to, in param order, so the line reads back as commands
+- **note** — notes are capped at 8 seconds (`MAX_NOTE_SECONDS`); the inner loop
+  is per-sample and costs well over `karplus`'s — **measured ~5.6ms per
+  2-second note**, so a chord of four long notes is ~22ms of the 100ms
+  scheduling window and is the way to make this expensive. Output hard-clips
+  at the top of the range (peak is exactly 1.0 with all ten inputs at 1, ~0.35
+  at the defaults): a resonant lowpass has gain at cutoff, and distorting
+  there beats making every ordinary setting quieter. Two documented
+  substitutions for Max
+  objects with no Web Audio equivalent: `lores~` → a Chamberlin state-variable
+  filter (its cutoff is remodulated every 64 samples and a biquad recomputing
+  coefficients that fast can go unstable), and `fluid.loudness~` → a one-pole
+  RMS follower read at the patch's own 64-sample hop. Events in the shipped
+  session use `pitch` rather than `degree` on purpose — a degree is resolved
+  against `/harmony`, so moving the root would silently renumber every state.
+
+### `czsynth` — `src/synths/czsynth.js`
+An emulation of the Casio CZ-101 (1984) — phase distortion, the synthesis
+behind the Boards of Canada palette. **There is no filter in it.** One cosine
+table is read with a phase bent by a piecewise-linear transfer function, so a
+period still takes exactly one period but is traversed unevenly; the DCW
+envelope moves how hard it is bent, which sounds like a filter opening while
+being nothing of the sort. At DCW 0 every waveform is a pure sine. Renders per
+note into an `AudioBuffer` like `karplus`/`chaossynth` (a per-sample
+nonlinearity whose *shape* is moving has no node equivalent —
+`WaveShaperNode` reshapes amplitude, not phase, from a fixed array).
+Polyphonic; **mono output**, because the CZ-101 has one.
+
+The machine's architecture: up to two *lines*, each `DCO → DCW → DCA` with an
+eight-stage envelope on all three, summed and detuned against each other.
+
+**The only synth with a preset library**, which is a consequence of the format
+rather than a preference: a tone is ~90 numbers. `src/synths/cz-tones.js`
+carries **28 Boards of Canada patches decoded from sysex dumps**
+(`.claude/context/Casio CZ 101/syx/`, one folder per record). Params are
+*modifiers over* whichever tone is selected, never absolutes — so choosing a
+preset never has to reach in and rewrite them.
+
+- **params** — `dcw` [0..2] (scales both DCW envelopes; **the filter knob** —
+  0 is a sine, 1 is the tone as dumped), `env_time` [0.05..8] (multiplies every
+  segment of all six envelopes), `detune` [0..100] extra cents between lines
+  (*added* to the tone's, which is often a whole octave), `vib_depth` [0..100]
+  extra cents, `vib_rate` [0.1..4] multiplier, `pitch_env` [0..4],
+  `key_follow` [0..2] (how much faster/darker high notes get)
+- **options** — `preset` (28 names, or `random`), `wave` (saw, square, pulse,
+  doublesine, sawpulse, reso1, reso2, reso3), `lines` (1, 2, 1+1, 1+2),
+  `mod` (none, ring, noise), `octave` (-1, 0, 1)
+- **also** — `describeState()` prints the resolved preset, waveform, lines,
+  octave, detune and both envelopes in the CZ's own `rate>level` units with
+  `*` on the sustain step
+- **note** — every option **except `preset`** takes the sentinel **`preset`**,
+  meaning "whatever the tone says". That is what keeps the two layers from
+  writing to each other, and it's the pattern to copy for any future
+  preset-backed type. Three genuine oddities: `reso1`/`reso2`/`reso3` are *not*
+  phase distortion (an inner sine hard-synced to the note through a per-cycle
+  window — so `dcw` there moves a **frequency**, not a brightness); a
+  *combination* preset alternates two waveforms on successive periods rather
+  than mixing them, which puts a sub-octave under the note; and output is
+  trimmed by half, because these waveforms are peak-to-peak 2 by construction
+  and the DC-heavy ones (pulse, doublesine) peak at 2 from zero once the DC
+  blocker has run. Cost is ~0.35ms per second of audio per line (a 3s two-line
+  note is ~1.9ms); `MAX_NOTE_SECONDS` caps a render at 12s. The envelope
+  **rate-to-seconds curve is fitted, not documented** — Casio never published
+  it and no teardown has recovered it; `env_time` is the intended correction.
+
 ---
 
 ## Processors (7)
@@ -226,7 +328,7 @@ the same control on two compressors rather than two code paths.
 
 ---
 
-## Modulators (6)
+## Modulators (7)
 
 A control source, never in a channel's chain — it exists to be patched
 somewhere. Two distinct shapes:
@@ -234,7 +336,7 @@ somewhere. Two distinct shapes:
 - **continuous** (`lfo`, `cv`): a bipolar signal on `.output`, patched into an
   `AudioParam` via `/patch source=<mod> dest=<name.param> depth=`.
 - **event-generating** (`randomnotes`, `markovpercs`, `euclidpercs`,
-  `patternvariator`):
+  `patternvariator`, `chorale`):
   implements `generateEvents(fromBeat, toBeat)` and is patched into a track's
   reserved `.notes` destination (`/patch source=<mod> dest=<track>.notes`, no
   `depth`). Generated notes run *alongside* a synth's authored `events`, never
@@ -310,6 +412,45 @@ Generated once and looped until reseeded, like `markovpercs`.
   token line for notes); `variation`/`density` are **options, not params**,
   because they feed seeded generation rather than being read per note
 
+### `chorale` — `src/modulators/chorale.js`
+Sustained, overlapping harmony: several long-held voices moving through a
+chord progression in a mode. **The only generator with no rhythm and nothing
+random in it** — every note is a pure function of the absolute beat, so the
+texture is identical on every pass and after any `/stop /start`. Drives any
+polyphonic synth (`tapepad`, `karplus`, `granular`).
+
+Two independent clocks: the **chord clock** (`chord_beats`) advances the
+progression, the **voice clock** (`note_beats`) re-attacks each voice. Because
+they don't line up, a voice holds its old note across a chord change — that
+overhang is where the suspensions come from. Voice leading is **positional,
+not remembered**: each voice has a fixed register anchor spread across
+`spread` octaves and always takes chord tone `v % chord_size` placed in the
+nearest octave, so the chord is always fully voiced and each voice moves the
+smallest interval that keeps it in its own register. More `voices` than
+`chord_size` wraps back to the root, which is an octave doubling when `spread`
+is wide enough to separate them and a wasted unison when it isn't — six voices
+want `spread=3`, four are happy at 1.
+
+- **params** — `velocity` [0..1], `note_beats` [0.25..64] (voice re-attack
+  period), `overlap` [0..2] (hold time as a multiple of the period beyond it —
+  this is what makes it continuous rather than gapped), `spread` [0..4]
+  octaves between the lowest and highest voice, `stagger` [0..1] (1 spreads
+  the voices' entries evenly across one period, 0 makes them block chords)
+- **options** — `mode` (ionian, dorian, phrygian, lydian, mixolydian, aeolian,
+  locrian, harmonicminor, pentatonic, wholetone), `progression`
+  (comma-separated mode steps, e.g. `0,5,3,4`), `chord_size` (3 = triad,
+  4 = seventh, 5 = ninth), `stack` (1..4 mode steps between chord tones;
+  2 = tertian, 3 = quartal, 4 = open fifths), `chord_beats`, `transpose`
+  (degrees — how a second instance becomes an octave-up layer), `voices`
+- **also** — `describeState()` prints the whole progression as actually voiced
+- **note** — a param is read when a voice *attacks*, not continuously, so a
+  ramp or patch on `spread`/`note_beats` arrives voice by voice as each one
+  re-enters: the pad revoices itself over a cycle rather than sliding.
+  `chord_beats` is an **option** for the opposite reason — the current chord is
+  derived by dividing the absolute beat by it, so ramping it would renumber
+  every chord boundary underneath the music rather than slowing the
+  progression down.
+
 ---
 
 ## Which one to copy
@@ -325,7 +466,14 @@ Generated once and looped until reseeded, like `markovpercs`.
 | is polyphonic / plays chords | `karplus`, `granular` |
 | schedules many short nodes per note (a cloud, a swarm) | `granular` |
 | plays sustained/pad material rather than one-shots | `granular` |
-| synthesizes into a buffer rather than a node graph | `karplus` |
+| synthesizes into a buffer rather than a node graph | `karplus`, then `chaossynth` (the per-sample, control-rate-inner-loop version) |
+| needs feedback tighter than a render quantum, or an envelope follower in the loop | `chaossynth` |
+| treats a MIDI note as something other than a pitch | `chaossynth` (a state index), `sampler`/`percsampler` (a slot) |
+| has many controls that should vary per note from one seed | `chaossynth` (`seed` + `spread`) |
+| ships a preset library, or has more state than a console can type | `czsynth` (data module + a `preset` option, params as modifiers) |
+| needs an option that means "don't override the preset" | `czsynth` (the `preset` sentinel on every other option) |
+| distorts phase rather than amplitude, or needs a moving nonlinearity | `czsynth` |
+| models a specific piece of hardware from its sysex format | `czsynth` |
 | is a straightforward effect | `reverb` |
 | has a param spanning several nodes | `delay` (`onSet`) |
 | needs a param that *ramps* across several nodes | `tilt`, or `RibbitProcessor.createCrossfade` |
@@ -337,6 +485,9 @@ Generated once and looped until reseeded, like `markovpercs`.
 | generates a fixed, looping pattern | `markovpercs` |
 | generates from grid position | `euclidpercs` |
 | plays or varies hand-authored material | `patternvariator` |
+| generates sustained/overlapping notes rather than hits | `chorale` |
+| needs chords, modes or voice leading | `chorale` |
+| must be exactly reproducible without a seed (derived purely from the beat) | `chorale` |
 | reads a host-served library (manifest) | `percsampler`, `granular` (both via `src/samples.js`), `patternvariator` (`src/pattern.js`) |
 | needs a param with no natural `AudioParam` | any of the last three — all use `RibbitParamSources` (`src/param.js`) |
 

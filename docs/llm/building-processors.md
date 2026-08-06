@@ -53,7 +53,11 @@ export class RibbitMyProcessor extends RibbitProcessor {
 `new RibbitParam(audioParam, opts?)` covers almost every case:
 - Single real `AudioParam` (most common): `new RibbitParam(this.someGain.gain)`.
 - Needs a value transform (rare outside channel gain's taper): `{ decode, encode }`.
-- Needs clamping: `{ min, max }`.
+- Needs clamping: `{ min, max }` — always declare both. They also decide
+  randomizability: `<param>=random` draws from the range, and the bulk
+  `/<name> random` skips any param without one.
+- Should never be part of a bulk `random` even though it has a range:
+  `{ randomizable: false }` (only channel `gain` uses this today).
 - Needs to fan one value out across more than one node **on instant set only**
   (e.g. `RibbitDelay.time` writing both delayL/delayR):
   `{ onSet: (value) => { /* write to both */ } }` — pass whichever node is

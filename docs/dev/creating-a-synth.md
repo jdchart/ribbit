@@ -145,8 +145,9 @@ command.
 `RibbitSynth.params` starts as `{}`. `oscsynth` and `sampler` leave it that
 way — their runtime surface is options (above) — but `percsampler`
 (`dynamics`/`pan_spread`/`speed_spread`), `karplus`
-(`damping`/`decay`/`brightness`), `granular` (nine) and `tapepad` (eleven) all
-declare params, so there are four worked examples to copy.
+(`damping`/`decay`/`brightness`), `granular` (nine), `tapepad` (eleven),
+`chaossynth` (fourteen) and `czsynth` (seven) all declare params, so there are
+six worked examples to copy.
 
 > **Read your params with `getModulated()`, not `get()`.** A synth param is
 > read in JavaScript when a note is scheduled, and a patch sums into the
@@ -179,6 +180,14 @@ this.params = { cutoff: this._paramSources.create(cutoff, { min: 20, max: 20000 
 dispose() { this._paramSources.dispose(); }
 ```
 
+**Declare `min`/`max` on every param.** Beyond clamping, a finite range at both
+ends is what makes the param randomizable: `/lead cutoff=random` draws from it,
+and the bulk `/lead random` includes the param only if it has one. A param left
+unbounded silently drops out of both (it shows `[no random: unbounded]` in
+`help`). Pass `randomizable: false` for a param where a drawn value would be a
+mistake rather than a timbre — nothing in a synth qualifies today; the only
+example in the engine is a channel's fader.
+
 ### Params that *aren't* read per note
 
 The rule above — read with `getModulated()`, moves note by note — applies to a
@@ -206,8 +215,9 @@ generic `output.disconnect()`.
 
 ## Optional: polyphony, and synthesizing into a buffer
 
-`karplus`, `granular` and `tapepad` are the polyphonic synths, and polyphony
-turned out to need no machinery: `trigger()` builds a fresh, self-contained
+`karplus`, `granular`, `tapepad`, `chaossynth` and `czsynth` are the
+polyphonic synths,
+and polyphony turned out to need no machinery: `trigger()` builds a fresh, self-contained
 voice per call, so a chord is simply several calls at the same beat. There's no
 voice allocator and nothing to run out of.
 
@@ -221,16 +231,69 @@ and when a note would exceed your node budget, **thin it rather than truncate
 it**: a texture that gets sparser is a texture, a note that stops halfway
 through is a bug you can hear.
 
-It's also the only synth that renders audio with a **JS loop into an
+`karplus`, `chaossynth` and `czsynth` render audio with a **JS loop into an
 `AudioBuffer`** instead of building a node graph. Worth knowing as a technique,
-because sometimes a node graph can't express the algorithm: there, Web Audio
-requires any feedback cycle containing a `DelayNode` to impose at least one
-render quantum (128 samples) of delay, which caps a node-graph Karplus-Strong
-around 375Hz — the middle of the playable range. Rendering the samples directly
-is exact at any pitch and, importantly, needs no `AudioWorklet` module for the
-host to serve, which would be a new category of host obligation (the engine
-otherwise only ever asks hosts for JSON manifests). The cost is well under a
-millisecond per note.
+because sometimes a node graph can't express the algorithm. In `karplus`, Web
+Audio requires any feedback cycle containing a `DelayNode` to impose at least
+one render quantum (128 samples) of delay, which caps a node-graph
+Karplus-Strong around 375Hz — the middle of the playable range. Rendering the
+samples directly is exact at any pitch and, importantly, needs no
+`AudioWorklet` module for the host to serve, which would be a new category of
+host obligation (the engine otherwise only ever asks hosts for JSON
+manifests). The cost is well under a millisecond per note.
+
+`chaossynth` is the same technique for a harder case, and the one to read if
+your algorithm is per-sample DSP rather than one loop. Its two feedback loops
+are single-sample by nature, so a render quantum of lag wouldn't degrade it —
+it would make it a different system. Three habits from it that generalize:
+
+- **Run two rates in one loop.** Its audible path (oscillator → saturator →
+  filter) is per sample, but the expensive control path (an RMS follower, a
+  log and an exp into the filter cutoff) runs every 64 samples with its
+  coefficient interpolated across the block. That is what makes the note
+  affordable.
+- **Check for divergence.** A feedback loop that produces one NaN poisons every
+  sample after it, and a buffer of NaN is silence plus a click, not a warning.
+  Reset the state when it goes non-finite.
+- **Cap the render length with a named constant, and measure the cost.** A slow
+  tempo and a long note otherwise allocate an unbounded buffer.
+  `MAX_NOTE_SECONDS` is 8, and the measured cost is ~5.6ms per 2-second note —
+  worth writing the number down, because it's the difference between "free"
+  and "budget the chord".
+
+`czsynth` is the third, and adds one habit the other two don't demonstrate:
+**a lookup table read at a phase you compute is easy to walk off the end of.**
+Its cosine table needs *two* guard entries rather than one, because four of
+its five distortion functions clamp to a phase of exactly `1.0` — so the
+interpolation reads `TABLE_SIZE + 1` every period, and with a single guard
+those waveforms render as pure NaN. Reading the code never showed it; the
+first offline render did.
+
+## Optional: a preset library
+
+Reach for one when a type's state is genuinely too large to type. `czsynth` is
+the only example and the bar is high: a Casio CZ tone is three eight-stage
+envelopes per line, about ninety numbers, so no arrangement of `params` and
+`options` would make it playable from a console.
+
+The shape that works:
+
+- **Presets are plain data in their own module** (`synths/cz-tones.js`) — not
+  a host manifest. A manifest is a new obligation on every host, and these
+  never change at runtime.
+- **`params` become modifiers over the selected preset, never absolutes.**
+  `dcw` scales the tone's envelope, `detune` *adds* cents to whatever the tone
+  already had. So selecting a preset never has to reach in and rewrite a param
+  — which would fight with ramps, patches and `/recall`.
+- **Every *other* option takes a `"preset"` sentinel**, meaning "whatever the
+  tone says". This is the piece that makes the two layers independent in both
+  directions: choosing a tone can't clobber an override, and an override never
+  needs re-applying afterwards. It also round-trips through a session file with
+  no special-casing, because the sentinel is just another option value.
+
+The alternative — having the `preset` setter write into `params` and the other
+options — was rejected because it makes load order significant: a session
+restores options and params separately, and whichever ran last would win.
 
 ## Optional: loading files from the host
 

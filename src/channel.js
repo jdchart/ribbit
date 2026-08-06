@@ -32,8 +32,16 @@ export class RibbitChannel {
         // (also 0-1) AudioParam value for perceptually-even steps; pan is
         // linear -1..1 straight onto its AudioParam. Same shape every
         // processor/modulator/patch uses for their own params.
+        //
+        // gain is the one param in the engine that opts out of `/<name>
+        // random` by default (see RibbitParam.randomizable): every other
+        // param a bulk randomize touches changes how something *sounds*,
+        // while a random fader position just makes the channel too quiet or
+        // too loud, and on a whole-object roll that reads as the command
+        // having broken the mix. `/master gain.r=true` turns it back on;
+        // `/master gain=random` never needed it.
         this.params = {
-            gain: new RibbitParam(this.gainNode.gain, { decode: gainToPosition, encode: positionToGain, min: 0, max: 1 }),
+            gain: new RibbitParam(this.gainNode.gain, { decode: gainToPosition, encode: positionToGain, min: 0, max: 1, randomizable: false }),
             pan: new RibbitParam(this.panner.pan, { min: -1, max: 1 }),
         };
 

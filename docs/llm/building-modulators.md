@@ -64,7 +64,7 @@ so don't override it. An option can't be *ramped*, but it can still be
 whether sweeping the value is musical, not whether it needs timing.
 Real examples in tree: `modulators/cv.js` is the smallest (a
 `ConstantSourceNode`, one unbounded param, no options — start here),
-`lfo.js` adds an option and a bounded param, and the four generators below
+`lfo.js` adds an option and a bounded param, and the five generators below
 are the event-generating shape.
 
 For a param with no `AudioParam` of its own, use `RibbitParamSources`
@@ -77,6 +77,10 @@ this._paramSources = new RibbitParamSources(audioContext);
 this.params = { swing: this._paramSources.create(swing, { min: 0, max: 0.5 }) };
 dispose() { this._paramSources.dispose(); }
 ```
+
+Declare both bounds: a finite range is also what makes the param randomizable
+(`/mod1 swing=random`, and inclusion in the bulk `/mod1 random`). `cv`'s
+deliberately unbounded `value` is the one modulator param they skip.
 
 A modulator can instead generate discrete events (notes) rather than a
 continuous signal — see `modulators/randomnotes.js` (`RibbitRandomNotes`) for
@@ -99,17 +103,28 @@ Several generators may feed the same track (only an exact duplicate
 source→dest patch is rejected), which is how a fixed backbone plus a
 decorating layer is built.
 
-Four generators exist, and they differ in *what decides whether a hit
-happens* — worth knowing before adding a fifth, since the useful axis is
+Five generators exist, and they differ in *what decides whether a note
+happens* — worth knowing before adding a sixth, since the useful axis is
 usually a new answer to that question rather than a new sound:
 `randomnotes` rolls fresh dice per slot (never repeats), `markovpercs` looks
 at the previous step (fixed pattern, no notion of bar position),
 `euclidpercs` looks at the step's own index (exactly repeatable, can hold a
 downbeat), `patternvariator` reads **a file a person wrote** and varies it
 (the only one whose material is authored rather than derived — see
-`docs/llm/building-patterns.md`). The step-string gap is closed: the `drums`
+`docs/llm/building-patterns.md`), and `chorale` answers "a voice's held note
+elapsed" — the only one not making a rhythm, and the only one with no
+randomness anywhere in it (no seed, nothing to reproduce: every note is a
+pure function of the absolute beat). The step-string gap is closed: the `drums`
 pattern kind *is* one, in a file rather than on the command line, since a
 16-character grid doesn't survive `splitCommands`.
+
+`chorale` is also the worked example of **deriving state positionally instead
+of remembering it**. Voice leading is naturally a "where was this voice last"
+problem, which would mean cursor state, an `onClockStart()` reset, and drift
+if a lookahead window were ever skipped. Anchoring each voice to a fixed
+register and taking the nearest octave of its assigned chord tone gets the
+same musical result as a pure function of the beat. Prefer that shape when you
+can find it — three of the five generators are stateless for the same reason.
 
 A drum generator should drive `RibbitPercSampler` through its published slot
 contract rather than emitting raw slot numbers: store `{ category, variant }`

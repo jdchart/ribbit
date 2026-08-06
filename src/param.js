@@ -1,3 +1,5 @@
+import { randomInRange } from "./random.js";
+
 // A single command-line-addressable parameter: wraps a raw Web Audio
 // AudioParam (optionally through a value transform — e.g. a channel's 0-1
 // taper position sitting on top of an exponential gain AudioParam) so every
@@ -13,12 +15,25 @@
 // lives right on the one object both paths now share, so there's nothing
 // left that can drift apart.
 export class RibbitParam {
-    constructor(audioParam, { decode = (v) => v, encode = (v) => v, min = -Infinity, max = Infinity, onSet } = {}) {
+    constructor(audioParam, { decode = (v) => v, encode = (v) => v, min = -Infinity, max = Infinity, onSet, randomizable = true } = {}) {
         this.audioParam = audioParam;
         this.decode = decode; // raw AudioParam value -> user-facing value
         this.encode = encode; // user-facing value -> raw AudioParam value
         this.min = min;
         this.max = max;
+
+        // Whether `/<object> random` (randomize everything at once) should
+        // touch this param — the console exposes it as `<param>.r=true|false`
+        // and a session file round-trips it (see session.js's no_random).
+        // Defaults to true because the interesting case is a sound-design
+        // param, and those are the overwhelming majority; a class opts out
+        // the few where a random value isn't a timbre but a mistake (a
+        // channel's fader, which would just make the track vanish).
+        //
+        // Note this is only about the *bulk* command: an explicit
+        // `<param>=random` always works, since asking for one param by name
+        // is not something to protect anyone from.
+        this.randomizable = randomizable;
         // Most params are a 1:1 mapping onto a single AudioParam's .value —
         // the default set() below handles that. A few (e.g. RibbitDelay's
         // "time") need to fan a single user-facing value out across more
@@ -98,6 +113,39 @@ export class RibbitParam {
 
     clamp(value) {
         return Math.max(this.min, Math.min(this.max, value));
+    };
+
+    // Whether a random draw is even *possible* here: both ends have to be
+    // finite, since "somewhere in -Infinity..Infinity" is not a number.
+    // Stricter than the `||` formatParamLine uses to decide whether to print
+    // a range at all — a half-declared range (a send's gain, min 0 and no
+    // max) is worth showing and not enough to draw from.
+    get hasRange() {
+        return Number.isFinite(this.min) && Number.isFinite(this.max);
+    };
+
+    // Included in `/<object> random`. Two independent reasons to be out: the
+    // flag was turned off, or there's no range to draw from in the first
+    // place. The console distinguishes them when listing (see
+    // formatParamLine) because only the first one is the user's doing.
+    get canRandomize() {
+        return this.randomizable && this.hasRange;
+    };
+
+    // One draw for this param, honoring an explicit min/max override (either
+    // or both — an omitted end falls back to the declared bound). Returns
+    // null when the resulting range still isn't finite, which is the caller's
+    // cue to say "give me min= and max=" rather than to invent a range: a
+    // param left deliberately unbounded (a patch's depth) has no defensible
+    // default span, and picking one silently would be worse than asking.
+    //
+    // The result is clamped, so an override wider than the declared range
+    // can't push a param somewhere a plain set couldn't.
+    randomValue({ min, max } = {}) {
+        const low = min ?? this.min;
+        const high = max ?? this.max;
+        if (!Number.isFinite(low) || !Number.isFinite(high)) return null;
+        return this.clamp(randomInRange(Math.min(low, high), Math.max(low, high)));
     };
 };
 

@@ -14,12 +14,15 @@ import { RibbitPercSampler } from "./synths/percsampler.js";
 import { RibbitKarplus } from "./synths/karplus.js";
 import { RibbitGranular } from "./synths/granular.js";
 import { RibbitTapePad } from "./synths/tapepad.js";
+import { RibbitChaosSynth } from "./synths/chaossynth.js";
+import { RibbitCZSynth } from "./synths/czsynth.js";
 import { RibbitLFO } from "./modulators/lfo.js";
 import { RibbitRandomNotes } from "./modulators/randomnotes.js";
 import { RibbitCV } from "./modulators/cv.js";
 import { RibbitMarkovPercs } from "./modulators/markovpercs.js";
 import { RibbitEuclidPercs } from "./modulators/euclidpercs.js";
 import { RibbitPatternVariator } from "./modulators/patternvariator.js";
+import { RibbitChorale } from "./modulators/chorale.js";
 import { RibbitPatch, RibbitEventPatch } from "./patch.js";
 import { createHarmonyContext } from "./harmony.js";
 
@@ -48,6 +51,8 @@ const SYNTH_TYPES = {
     karplus: RibbitKarplus,
     granular: RibbitGranular,
     tapepad: RibbitTapePad,
+    chaossynth: RibbitChaosSynth,
+    czsynth: RibbitCZSynth,
 };
 
 const MODULATOR_TYPES = {
@@ -57,6 +62,7 @@ const MODULATOR_TYPES = {
     markovpercs: RibbitMarkovPercs,
     euclidpercs: RibbitEuclidPercs,
     patternvariator: RibbitPatternVariator,
+    chorale: RibbitChorale,
 };
 
 // Every name the console router dispatches before it ever looks at objects:

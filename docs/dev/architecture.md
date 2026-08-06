@@ -472,8 +472,8 @@ with no `depth` to serialize/ramp — `session.js`'s `serializePatch`/
 `reconcilePatches` both check `patch.params.depth` before touching it, since
 an `RibbitEventPatch`'s `params` is `{}`.
 
-Four generators now exist, and the useful axis between them is **what decides
-whether a hit happens** — worth knowing before adding a fifth, since a new
+Five generators now exist, and the useful axis between them is **what decides
+whether a note happens** — worth knowing before adding a sixth, since a new
 answer to that question is usually more valuable than a new sound.
 `RibbitRandomNotes` rolls fresh dice per slot (never repeats).
 `RibbitMarkovPercs` looks at the previous step (a fixed pattern, but no notion
@@ -484,6 +484,12 @@ only one whose material is authored rather than derived, and the reason the
 long-noted "step-string parser" gap is now closed: the `drums` pattern kind
 *is* one, living in a file rather than on the command line, because sixteen
 grid characters don't survive `splitCommands`.
+`RibbitChorale` answers "a voice's held note elapsed" — the only one not
+producing a rhythm, and the only one with no randomness anywhere in it. It
+holds overlapping sustained voices and moves them through a chord progression,
+deriving voice leading *positionally* (a fixed register anchor per voice, and
+the nearest octave of its assigned chord tone) rather than by remembering
+where each voice was, which is what keeps it a pure function of the beat.
 
 The three percussion generators share one slot contract through
 `RibbitModulator._stride()` (see `source-overview.md`): each stores

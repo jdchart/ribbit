@@ -330,6 +330,48 @@ strikethrough when off), or remove it entirely:
 /drums remove_processor=p2
 ```
 
+## Rolling the dice
+
+Anywhere a param takes a number, it also takes the word `random`:
+
+```
+/delay feedback=random     pick a feedback amount from its 0..0.95 range
+/delay wet=random 4b       ...and glide there over 4 beats instead of jumping
+```
+
+It's an ordinary value, so everything you already know applies — ramps,
+`at=beat`/`at=cycle`, all of it. Narrow the range with `min=`/`max=` when the
+full sweep is too wild:
+
+```
+/delay time=random min=0.1 max=0.4
+```
+
+The bare word `random` on its own rolls **every** param on that object at
+once — the fastest way to find something you wouldn't have typed:
+
+```
+/delay random          new time, feedback and wet, all at once
+/delay random=8b       the same roll, arrived at over 8 beats
+```
+
+On a track it covers the channel *and* its synth. One param is left out by
+default: `gain`, because a random fader isn't a new sound, it's a track that
+vanished. You control what's included per param, and it's remembered when you
+save:
+
+```
+/delay feedback.r=false    stop rolling feedback
+/drums gain.r=true         start rolling the drum fader after all
+```
+
+`/delay help` marks anything a bulk roll will skip with `[no random: ...]`.
+
+One honest caveat: the range a param declares is a *safety clamp*, not a
+tasteful range. `/lfo1 random` picks from `0..20000` Hz, which is what the
+oscillator accepts and almost never what you wanted from an LFO. Use
+`min=`/`max=` whenever the result keeps coming out silly.
+
 ## Buses and sends
 
 Every track (and master) has at least one **send** — where its signal
@@ -972,6 +1014,231 @@ drifting somewhere different (which is a chorus pedal).
 
 `/code-editor/ambient-tape` is the worked version: three tapepad layers over
 the `ambientchords` pack, plus a dusty beat.
+
+## Harmony that never stops: `chorale`
+
+Every generator so far has made a *rhythm* — hits on a grid, however that grid
+was decided. `chorale` makes the other thing: long overlapping notes moving
+through chords, with no rhythm anywhere in it.
+
+```
+/add_track name=pad synth=tapepad
+/add_modulator type=chorale name=bed mode=aeolian progression=0,5,3,4
+/patch source=bed dest=pad.notes
+/start
+/bed                            # the progression, as actually voiced
+```
+
+`/bed` prints `aeolian | 0: 0,3,19,22 | 5: -4,12,15,19 | ...` — each chord as
+the degrees the voices will actually sing. That's worth reading rather than
+inferring, because `mode` and `progression` only say how the chords were
+*derived*. (Those gaps are the default `spread=2` giving each voice its own
+octave; `/bed spread=1` closes it up to `0,3,7,10`, an ordinary minor seventh.)
+
+Two clocks run underneath. `chord_beats` advances the progression; `note_beats`
+re-attacks each voice. Nothing lines them up, which is the point — a voice that
+attacked before a chord change holds its old note across it, and those
+overhangs are the suspensions you can hear.
+
+Continuity comes from `overlap`: each note holds *longer* than it takes to
+play the next one, so a voice crossfades with itself instead of leaving a gap.
+Try turning the texture inside out:
+
+```
+/bed stagger=0 8b               # all voices attack together: block chords
+/bed stagger=1 8b               # back to a continuous wash
+/bed overlap=1.4 8b             # notes hold nearly twice their period
+/bed spread=3 16b               # fan the voices apart over an octave and a half
+```
+
+There's a wrinkle worth understanding. Ramping `spread` doesn't slide the
+chord around — a chorale param is read when a voice **attacks**, not
+continuously, so the change arrives voice by voice as each one re-enters and
+the pad revoices itself over a cycle. That's the per-note rule from the last
+chapter, made audible over a long enough time to watch it happen.
+
+The harmony itself is all options:
+
+```
+/bed mode=lydian                # same progression, brighter
+/bed mode=phrygian              # same progression, much darker
+/bed stack=4                    # stop stacking thirds: open fifths, no third
+/bed chord_size=5               # ninths instead of sevenths
+/bed progression=0,3,5,1        # rewrite the changes
+/bed chord_beats=32 at=cycle    # half as much harmonic motion
+```
+
+`chord_beats` is an option rather than a param for a reason worth knowing: the
+current chord is found by dividing the beat by it, so *ramping* it would
+renumber every chord boundary underneath the music instead of slowing the
+progression down. Set it, with `at=cycle` if you want it to land on a
+boundary.
+
+One last thing that makes `chorale` unlike every other generator: it has **no
+seed**. There's nothing random in it at all — every note is a pure function of
+the beat — so it plays the same thing on every pass and after any `/stop`
+`/start`. It's a bed to put other things on, not a pattern that develops.
+
+`/code-editor/chorale-drift` runs three at once: close sevenths, ninths an
+octave up (`transpose=12`), and a one-voice bass line (`chord_size=1
+transpose=-12`), with the first patched into *two* tracks so a `tapepad` and a
+`karplus` sing the identical voicing.
+
+## When a note isn't a pitch: `chaossynth`
+
+Every synth so far has treated a note the way you'd expect: `pitch` picks a
+frequency (or, for a sampler, a slot). `chaossynth` breaks that on purpose,
+and it's worth a chapter because nothing else in the engine works this way.
+
+It's a chaotic instrument — two sine oscillators wired into each other, each
+one driven hard through a saturator into a resonant filter whose cutoff is
+controlled by how loud that voice currently is. Nothing settles. Ten controls
+steer it, all `0..1`, five per voice:
+
+```
+/add_track name=riff synth=chaossynth
+/riff add_event beat=0 pitch=36 duration=0.75
+/riff add_event beat=2 pitch=41 duration=0.5
+/riff add_event beat=3.5 pitch=55 duration=1
+/start
+```
+
+Three notes, three completely different sounds. That's the point:
+
+```
+/riff
+```
+
+prints the seed and the ten values note 60 currently resolves to. **`seed`
+builds one configuration of all ten controls per MIDI note**, 0 to 127 — so
+note 36 is a sound, note 41 is a different sound, and note 36 is *the same
+sound every time it comes round*. Chaotic, not random.
+
+```
+/riff seed=random               # a whole new instrument, same three notes
+/riff seed=7                    # seeds reproduce; a saved session rebuilds
+```
+
+Which means any generator you've already met becomes a way to sequence
+**timbres**. Point `randomnotes` at it and every note is a new state; point a
+`chorale` at it and the progression turns into a slowly-rotating set of
+sounds:
+
+```
+/add_modulator type=randomnotes name=roll
+/patch source=roll dest=riff.notes
+```
+
+The ten controls are still yours. `spread` decides how much the seed is
+allowed to argue with them:
+
+```
+/riff spread=0 8b               # your params exactly; every note identical
+/riff spread=1 8b               # the seeded state outright; params ignored
+/riff spread=0.6 8b             # somewhere in between — the usual place
+```
+
+At `spread=0` this is an ordinary (if unruly) synth you dial in by hand. Turn
+it up and your settings become a *centre* that each note departs from. Either
+way you can still reach every control point on its own, ramp it, or patch an
+LFO into it:
+
+```
+/riff a_cross=0.5 4b            # more coupling: pitch stops meaning anything
+/riff a_cross=0.02 4b           # almost decoupled — two clean drones
+/riff a_track=0 4b              # kill the loudness→filter loop
+/riff a_res=0.95                # and now it rings
+/riff random                    # re-roll all ten at once
+```
+
+`a_cross` is the chaos knob (how hard the *other* voice bends this one's
+pitch) and `a_track` is the self-regulating loop (how much a voice's own
+loudness closes its filter). `b_`-prefixed versions do the same for voice B,
+which is the right channel — `/riff output=a` puts one voice on both channels
+if you want to hear which half is doing what.
+
+If you do want the notes to behave like notes again, `pitch_track` blends that
+back in:
+
+```
+/riff pitch_track=1 8b          # a note now transposes as well as selecting
+```
+
+`/code-editor/chaos-states` is the worked example: the same synth at `spread`
+0.6, 0.95 and 0 — a hand-written riff, a `randomnotes`-driven wild layer, and
+a drone with two LFOs walking its control points — over a euclidean kit.
+
+## A synth with presets: `czsynth`
+
+Every other synth here is built from its params. `czsynth` isn't, and that's
+worth a chapter for two reasons: it's the only one that ships a preset
+library, and the thing its main knob does isn't what it sounds like.
+
+It's an emulation of the Casio CZ-101 from 1984 — the synth behind most of
+what people mean by "the Boards of Canada sound". Twenty-eight presets ship
+with it, decoded from real patch dumps:
+
+```
+/add_track name=keys synth=czsynth preset=turquoise-hexagon-sun-epiano
+/keys add_event beat=0 degree=0 duration=0.25
+/keys add_event beat=2 degree=7 duration=0.25
+/keys add_event beat=3 degree=12 duration=0.25
+/start
+```
+
+Short notes, long tails — on this instrument a note is mostly its *release*,
+which is why `duration=0.25` still rings for seconds.
+
+Now the knob:
+
+```
+/keys dcw=0 8b
+/keys dcw=1 8b
+```
+
+That sounds like a filter closing and opening. **There is no filter.** The CZ
+works by phase distortion: a cosine table is read with a phase that's been
+bent by a piecewise-linear function, so each period still takes exactly one
+period but gets traversed unevenly — fast through part of it, slow or stopped
+through the rest. `dcw` moves how hard it's bent. At `0` the bend is the
+identity and you get a pure sine, whichever waveform is selected; opening it
+up adds harmonics. Same audible gesture as a filter sweep, completely
+different mechanism.
+
+The presets are the *base*, and all seven params are modifiers on top of
+whatever is loaded — so you can swap tones without losing your edits:
+
+```
+/keys env_time=4 8b             # stretch every envelope; an epiano becomes a pad
+/keys preset=zander-two-bells   # your dcw and env_time survive the change
+/keys preset=random
+```
+
+Options work the other way round: each one defaults to the sentinel `preset`,
+meaning "whatever the tone says". Override one and set it back when you're
+done:
+
+```
+/keys wave=square               # override the waveform, tone untouched
+/keys wave=preset               # give it back
+/keys lines=1+2                 # both lines, detuned as the tone specifies
+/keys octave=-1
+```
+
+`/keys` on its own prints what everything resolved to, including both
+envelopes in the CZ's own units — `DCW 67>0*` means the DCW envelope rises at
+rate 67 to level **0** and sustains there, which is how you can tell that
+`sixtyniner-sine-pad` really is nothing but a sine.
+
+One genuine trap, inherited from the hardware: `wave=reso1`, `reso2` and
+`reso3` are *not* phase distortion at all — they're a hard-synced sine through
+a per-cycle window — so on those three `dcw` moves a frequency rather than a
+brightness. Casio named them "resonant sawtooth/triangle/trapezoid" after the
+window shape, and it has been confusing people ever since.
+
+`/code-editor/cz-tapes` is the worked version: five `czsynth` tracks over a
+dusty kit, with the effect routing lifted from the notes that came with the
+patches.
 
 ## The mixer
 

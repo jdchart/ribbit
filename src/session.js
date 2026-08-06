@@ -41,6 +41,31 @@ function serializeParams(paramsMap) {
     return out;
 };
 
+// Which params the bulk `/<object> random` command currently skips because
+// their `.r` flag is off (see RibbitParam.randomizable and commands.js).
+// Rides alongside `params` as a sibling key rather than inside it, so the
+// existing `{ key: value }` param shape — read by every load path, and by
+// every session file already written — stays exactly as it was.
+//
+// Records the *whole* excluded set, including whatever a class ships with
+// off by default (a channel's gain), not just what the user changed: that
+// makes restoring a plain assignment instead of a diff against defaults this
+// module would otherwise have to know. Omitted entirely when nothing is
+// excluded.
+function serializeNoRandom(paramsMap) {
+    const excluded = Object.keys(paramsMap).filter((key) => !paramsMap[key].randomizable);
+    return excluded.length ? { no_random: excluded } : {};
+};
+
+// The inverse. Only does anything when the key is actually present — a
+// session file written before this existed has no `no_random`, and reading
+// its absence as "nothing is excluded" would quietly switch the defaults on
+// for every object in it.
+function applyNoRandom(paramsMap, list) {
+    if (!list) return;
+    for (const [key, param] of Object.entries(paramsMap)) param.randomizable = !list.includes(key);
+};
+
 // Loop-position automation, stored by param *name* with user-facing
 // (decoded) from/to values — an RibbitAutomationEvent's own `target` is a raw
 // AudioParam reference, which can't survive JSON. Only events carrying a
@@ -117,6 +142,7 @@ function serializeProcessor(processor) {
         active: processor.active,
         options: processor.getOptions(),
         params: serializeParams(processor.params),
+        ...serializeNoRandom(processor.params),
         automation: serializeAutomation(processor),
     };
 };
@@ -127,6 +153,7 @@ function serializeModulator(modulator) {
         name: modulator.name,
         options: modulator.getOptions(),
         params: serializeParams(modulator.params),
+        ...serializeNoRandom(modulator.params),
         automation: serializeAutomation(modulator),
     };
 };
@@ -138,6 +165,7 @@ function serializeSends(channel) {
 function serializeChannel(channel, { includeSends = true } = {}) {
     const data = {
         params: serializeParams(channel.params),
+        ...serializeNoRandom(channel.params),
         processors: channel.processors.map(serializeProcessor),
         automation: serializeAutomation(channel),
     };
@@ -158,6 +186,7 @@ function serializeTrack(track) {
             type: track.source.type,
             options: track.source.getOptions(),
             params: serializeParams(track.source.params),
+            ...serializeNoRandom(track.source.params),
             events: track.source.events.map(serializeEvent),
         },
     };
@@ -220,6 +249,7 @@ function applyChannelParams(channel, data) {
     for (const [key, value] of Object.entries(data.params)) {
         channel.params[key]?.set(value);
     }
+    applyNoRandom(channel.params, data.no_random);
 };
 
 function loadProcessors(ribbit, channel, processorsData = []) {
@@ -230,6 +260,7 @@ function loadProcessors(ribbit, channel, processorsData = []) {
         for (const [key, value] of Object.entries(data.params)) {
             processor.params[key]?.set(value);
         }
+        applyNoRandom(processor.params, data.no_random);
         processor.automation = rebuildAutomation(processor, data.automation);
     }
 };
@@ -336,6 +367,7 @@ export function loadSession(ribbit, json) {
         for (const [key, value] of Object.entries(data.synth.params)) {
             track.source.params[key]?.set(value);
         }
+        applyNoRandom(track.source.params, data.synth.no_random);
         track.source.events = data.synth.events.map((event) => new RibbitEvent(event));
     }
 
@@ -353,6 +385,7 @@ export function loadSession(ribbit, json) {
         for (const [key, value] of Object.entries(data.params)) {
             modulator.params[key]?.set(value);
         }
+        applyNoRandom(modulator.params, data.no_random);
         modulator.automation = rebuildAutomation(modulator, data.automation);
     }
 
@@ -385,7 +418,13 @@ function rampOrSet(ribbit, param, targetValue, { startTime, durationSeconds }) {
     }
 };
 
-function applyParamsSnapshot(ribbit, paramsMap, targetValues = {}, opts) {
+// `noRandom` rides along here rather than getting its own pass at each call
+// site: every reconcile below already calls this with the right params map
+// and the snapshot chunk the flags live in. Applied immediately, not deferred
+// to startTime like the values around it — a `.r` flag isn't audible, so
+// there's no boundary for it to land on and nothing a ramp could mean.
+function applyParamsSnapshot(ribbit, paramsMap, targetValues = {}, opts, noRandom) {
+    applyNoRandom(paramsMap, noRandom);
     for (const [key, value] of Object.entries(targetValues)) {
         const param = paramsMap[key];
         if (param) rampOrSet(ribbit, param, value, opts);
@@ -409,7 +448,7 @@ function reconcileProcessors(ribbit, channel, targetList, { startTime, durationS
     const finalOrder = targetList.map((data) => {
         let processor = channel.processors.find((p) => key(p) === `${data.type}:${data.name}`);
         if (!processor) processor = ribbit.createProcessor(data.type, { name: data.name, ...data.options });
-        applyParamsSnapshot(ribbit, processor.params, data.params, { startTime, durationSeconds });
+        applyParamsSnapshot(ribbit, processor.params, data.params, { startTime, durationSeconds }, data.no_random);
         return { processor, active: data.active, data };
     });
 
@@ -452,7 +491,7 @@ function reconcileSends(ribbit, channel, targetList, { startTime }) {
 };
 
 function reconcileMaster(ribbit, data, opts) {
-    applyParamsSnapshot(ribbit, ribbit.master.params, data.params, opts);
+    applyParamsSnapshot(ribbit, ribbit.master.params, data.params, opts, data.no_random);
     reconcileProcessors(ribbit, ribbit.master, data.processors ?? [], opts);
     scheduleAt(ribbit, opts.startTime, () => {
         ribbit.master.automation = rebuildAutomation(ribbit.master, data.automation);
@@ -479,7 +518,7 @@ function reconcileChannelList(ribbit, live, targetList, { create, remove, onMatc
         }
 
         const { gain: _gain, ...restParams } = data.params;
-        applyParamsSnapshot(ribbit, channel.params, restParams, opts);
+        applyParamsSnapshot(ribbit, channel.params, restParams, opts, data.no_random);
         rampOrSet(ribbit, channel.params.gain, data.params.gain, opts);
         reconcileProcessors(ribbit, channel, data.processors ?? [], opts);
         if (data.sends) reconcileSends(ribbit, channel, data.sends, opts);
@@ -497,7 +536,7 @@ function reconcileChannelList(ribbit, live, targetList, { create, remove, onMatc
             const { gain: targetGain, ...restParams } = data.params;
 
             channel.params.gain.set(0);
-            applyParamsSnapshot(ribbit, channel.params, restParams, instantOpts);
+            applyParamsSnapshot(ribbit, channel.params, restParams, instantOpts, data.no_random);
             reconcileProcessors(ribbit, channel, data.processors ?? [], instantOpts);
             if (data.sends) reconcileSends(ribbit, channel, data.sends, instantOpts);
             channel.automation = rebuildAutomation(channel, data.automation);
@@ -515,7 +554,7 @@ function reconcileModulators(ribbit, targetList, opts) {
         if (!data) {
             scheduleAt(ribbit, opts.startTime + opts.durationSeconds, () => ribbit.removeModulator(modulator));
         } else {
-            applyParamsSnapshot(ribbit, modulator.params, data.params, opts);
+            applyParamsSnapshot(ribbit, modulator.params, data.params, opts, data.no_random);
             scheduleAt(ribbit, opts.startTime, () => {
                 applyOptionsSnapshot(modulator, data.options);
                 modulator.automation = rebuildAutomation(modulator, data.automation);
@@ -527,7 +566,7 @@ function reconcileModulators(ribbit, targetList, opts) {
         if (ribbit.modulators.some((m) => m.name === data.name)) continue;
         scheduleAt(ribbit, opts.startTime, () => {
             const modulator = ribbit.createModulator(data.type, { name: data.name, ...data.options });
-            applyParamsSnapshot(ribbit, modulator.params, data.params, { startTime: opts.startTime, durationSeconds: 0 });
+            applyParamsSnapshot(ribbit, modulator.params, data.params, { startTime: opts.startTime, durationSeconds: 0 }, data.no_random);
             modulator.automation = rebuildAutomation(modulator, data.automation);
         });
     }
@@ -638,6 +677,7 @@ export function applySnapshot(ribbit, snapshot, { startTime, durationSeconds = 0
                 } else {
                     applyOptionsSnapshot(track.source, data.synth.options);
                 }
+                applyNoRandom(track.source.params, data.synth.no_random);
                 track.source.active = data.active;
                 track.source.events = data.synth.events.map((event) => new RibbitEvent(event));
             });

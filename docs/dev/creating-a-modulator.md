@@ -193,7 +193,10 @@ document that it's worth calling out rather than shoehorning into the
   `RibbitRandomNotes`'s `probability`/`min_gap` — use **`RibbitParamSources`**
   (`param.js`): `this._paramSources = new RibbitParamSources(audioContext)`,
   then one `this._paramSources.create(value, { min, max })` per param, each
-  returning a ready-made `RibbitParam`. It exists because such a param needs
+  returning a ready-made `RibbitParam`. Give both bounds: besides clamping,
+  a finite range is what lets `/mod1 swing=random` and the bulk `/mod1 random`
+  reach the param at all (`cv`'s deliberately unbounded `value` is the one
+  modulator param they skip). It exists because such a param needs
   a `ConstantSourceNode` **routed through a muted sink into
   `audioContext.destination`**, not left fully disconnected: a disconnected
   node's `setValueAtTime`-scheduled automation can silently never be
@@ -231,12 +234,23 @@ usually a more useful axis for a fifth than a new sound:
 | `markovpercs` | the previous step — fixed pattern, no notion of bar position |
 | `euclidpercs` | the step's own index — exactly repeatable, can hold a downbeat |
 | `patternvariator` | **a file a person wrote**, plus seeded variation |
+| `chorale` | a voice's held note having elapsed — no rhythm, no randomness |
 
-The last one is the odd one out and worth understanding before adding another:
-its material is *authored* rather than derived, which is a genuinely different
-proposition from the other three. See
+Two are odd ones out and worth understanding before adding another.
+`patternvariator`'s material is *authored* rather than derived, a genuinely
+different proposition from the rule-driven ones — see
 [creating-a-pattern.md](creating-a-pattern.md) for the format it reads and how
-to extend it.
+to extend it. And `chorale` isn't producing a rhythm at all: it holds long
+overlapping notes and moves them through chords, so it has no seed and nothing
+to reproduce, every note being a pure function of the absolute beat.
+
+`chorale` is worth reading for one technique in particular: **deriving state
+positionally rather than remembering it**. Voice leading looks like a "where
+was this voice last" problem, which would mean a cursor, an `onClockStart()`
+reset, and drift whenever a lookahead window is skipped. Giving each voice a
+fixed register anchor and taking the nearest octave of its assigned chord tone
+reaches the same musical result as a pure function of the beat. Reach for that
+shape when you can find it.
 
 One design note that applies to all of them: a value consulted only when the
 pattern is **regenerated** should be an *option*, even when it's numeric,
@@ -244,6 +258,14 @@ because a ramp on it would look like a control that does nothing. Reserve
 params for values read fresh inside `generateEvents`. Both `markovpercs` and
 `patternvariator` split exactly this way — `seed`/`variation`/`density` are
 options, `velocity`/`swing` are params.
+
+`chorale` shows the same call made on a generator that never regenerates at
+all: `note_beats` is a *param* (sweeping how often a voice re-attacks is
+musical), while `chord_beats` is an *option* despite also being read fresh —
+the current chord is found by dividing the absolute beat by it, so a ramp
+would renumber every chord boundary underneath the music rather than slowing
+the progression down. "Would sweeping this be musical?" is the question, not
+"is it read fresh?".
 
 Read those params with **`getModulated()`** rather than `get()` inside
 `generateEvents`. `get()` returns the intrinsic value and is blind to

@@ -19,6 +19,12 @@
 - A value can be followed by a bare duration to turn a set into a ramp, e.g.
   `gain=0.5 3` (over 3 seconds) or `gain=0.5 4b` (over 4 beats) — see
   [Ramps](#ramps) below.
+- The literal value `random` on any param draws one value from its range
+  instead of naming a number: `/lead cutoff=random`. See
+  [Randomizing](#randomizing).
+- A key may carry one dotted suffix naming an *attribute* of a param rather
+  than the param itself. Only `.r` exists: `/lead cutoff.r=false` excludes
+  `cutoff` from the bulk `random` command (see [Randomizing](#randomizing)).
 - `at=beat` or `at=cycle` anywhere in a command defers it to the next beat or
   loop boundary. This works on *every* command that changes something, not
   only ramps — see [Scheduling with `at=`](#scheduling-with-at).
@@ -58,20 +64,25 @@ track_1 — gain=0.80 pan=0.00 inserts=[p1:reverb] sends=[s1:master(1.00)] synth
 track_1 — gain=0.80 pan=0.00 inserts=[p1:reverb] sends=[s1:master(1.00)] synth=oscsynth("...")
 
 params:
-  gain=0.800 (range 0..1)
+  gain=0.800 (range 0..1)  [no random: .r=false]
   pan=0.000 (range -1..1)
 
 commands:
-  gain=<val> / pan=<val>          set instantly; add a trailing duration to ramp, e.g. gain=0 3 (3s) or gain=0 4b (4 beats)
+  gain=<val> / pan=<val>           set instantly; add a trailing duration to ramp, e.g. gain=0 3 (3s) or gain=0 4b (4 beats)
+  <param>=random [min= max=]       draw one value in the param's range (or between min= and max=); ramps and defers like any other value, e.g. cutoff=random 4b at=cycle
+  random [=<duration>]             draw a new value for EVERY param above that isn't marked [no random] — this channel's and its synth's; random=4b glides there instead of jumping
+  <param>.r=true|false             include/exclude one param from that bulk random (saved with the session)
   at=beat|cycle                    defer ANY command on this line — a set, a ramp, or a discrete change like start/stop/synth=/an option — to the next beat/loop boundary instead of firing now
-  synth=<type>                     swap this track's synth (oscsynth, sampler, percsampler, karplus, granular, tapepad)
+  synth=<type>                     swap this track's synth (oscsynth, sampler, percsampler, karplus, granular, tapepad, chaossynth, czsynth)
   add_event beat= pitch=|degree= velocity= duration=   append a note event (all optional except beat)
   ...
 ```
 
 A param whose range was never declared (e.g. a patch's `depth`, which is
 deliberately unbounded — a negative depth inverts the modulation) shows just
-its current value, with no `(range ...)` suffix. `help` works identically on master, any bus, any
+its current value, with no `(range ...)` suffix. A trailing `[no random: ...]`
+marks a param the bulk `random` command skips, and says which of the two
+reasons applies — see [Randomizing](#randomizing). `help` works identically on master, any bus, any
 processor, and any modulator — the exact command list shown differs by kind
 (see the [Channel](#channel-commands-master-or-any-trackbus-by-name),
 [Processor](#processor-commands-any-processor-by-nameid-derived-name-eg-reverb-delay),
@@ -120,6 +131,9 @@ bus has the same shape, minus the trailing `synth=...` (it has none).
 |---|---|
 | `gain=<0..1>` | Sets the channel's fader position (clamped, exponentially tapered onto actual output level for perceptually-even steps — see [objects.md](objects.md#gain-taper)). Rampable and `at=` deferrable — see [Ramps](#ramps). Can also be a patch destination (`track_1.gain`, `bus1.gain`). |
 | `pan=<-1..1>` | Sets stereo pan (clamped). Also rampable/deferrable/patchable, same as `gain=`. |
+| `<param>=random [min=] [max=]` | Draws one value for that param instead of naming a number — works on `gain`, `pan`, and any of the track's synth params. Rampable and `at=` deferrable like any other value. `min=`/`max=` narrow the range for every `=random` on that line; either alone falls back to the param's own declared bound. See [Randomizing](#randomizing). |
+| `random [=<duration>]` | Draws a new value for **every** param on this channel *and* its synth that isn't excluded — see [Randomizing](#randomizing). A duration ramps them all instead of jumping: `/lead random=4b`. |
+| `<param>.r=true\|false` | Includes/excludes one param from the bulk `random` above. Saved with the session. `gain` ships excluded; everything else ships included. |
 | `add_event [beat=] [pitch=\|degree=] [velocity=] [duration=]` | Appends one event to the track's synth. All fields optional (defaults: `beat=0`, `pitch=60` if neither `pitch=` nor `degree=` given, `velocity=1`, `duration=0.25`). `pitch=` is a raw MIDI note (or, for `sampler`/`percsampler`, a slot index); `degree=` is a scale-degree resolved against the shared harmony context *at trigger time* instead — see [objects.md](objects.md#events). A `beat` at or past the current loop length is accepted (it starts sounding if `num_beats` is later raised past it) but flagged with a warning, since it won't fire until then. Not valid on master or a bus (neither has a synth). |
 | `events` | Lists the track's synth's events, one per line with an index: `0: beat=0 pitch=60 velocity=1 duration=0.25`. The index is the handle `remove_event=` takes. Not valid on master or a bus. |
 | `remove_event=<n>` | Removes one event by its `events` index. Out-of-range indices are rejected with a pointer back to `events`. Not valid on master or a bus. |
@@ -167,6 +181,7 @@ reverb (p1): A simple algorithmic reverb: convolution against a generated impuls
 |---|---|
 | `<param name>=<value>` | Sets that processor's parameter (see [objects.md](objects.md) for each type's params). Unknown param names are reported per-key without aborting the rest of the command. Also rampable/deferrable/patchable — see [Ramps](#ramps) and [Modulators and patches](#modulators-and-patches). |
 | `<option name>=<value>` | Sets one of the processor's **options** — non-rampable settings with no AudioParam behind them, e.g. `/reverb duration=4` regenerates the impulse response in place. See [Params vs. options](#params-vs-options). |
+| `<param>=random [min=] [max=]` / `random [=<duration>]` / `<param>.r=true\|false` | Draw one param, draw them all, or change which are included — identical to the channel versions, see [Randomizing](#randomizing). |
 | `automate=<param> to= [from= beat= duration= curve= once]` | Loop-position automation on any of its params, plus `automations`/`remove_automation=<n>`/`clear_automation` — identical to the channel version, see [Loop automation](#loop-automation). |
 | `remove_self` | Removes this processor from whatever channel it's inserted into (and any patch touching it). |
 
@@ -174,7 +189,7 @@ reverb (p1): A simple algorithmic reverb: convolution against a generated impuls
 
 Work exactly like processor commands — no parameters for a one-line summary,
 `help` for the full reference; set any param (rampable, deferrable,
-patchable, same as a processor) or option (`/lfo1 waveform=square`,
+patchable, randomizable, same as a processor) or option (`/lfo1 waveform=square`,
 `/rand1 scale=0,3,5,7,10` — see [Params vs. options](#params-vs-options));
 `automate=`/`automations`/`remove_automation=`/`clear_automation` work the
 same as on a processor; `remove_self` removes it (and any patch
@@ -232,10 +247,11 @@ that was feeding into it, the same way removing a patch's endpoint does.
 ## Modulators and patches
 
 A **modulator** is a standalone control source — created and addressed just
-like a processor, but it never sits in any channel's signal chain. Four
+like a processor, but it never sits in any channel's signal chain. Seven
 types ship: `lfo` (a low-frequency oscillator, the default), `cv` (a held
-value you set/ramp yourself), and two that generate notes rather than a
-signal — `randomnotes` and `markovpercs` (see
+value you set/ramp yourself), and five that generate notes rather than a
+signal — `randomnotes`, `markovpercs`, `euclidpercs`, `patternvariator` and
+`chorale` (see
 [below](#event-generating-modulators-patching-notes-into-a-synth)).
 Full reference: [objects.md](objects.md#modulators-type-on-add_modulator).
 A modulator only matters once you **patch** it somewhere:
@@ -298,8 +314,9 @@ outlives what it was connected to.
 
 ### Event-generating modulators: patching notes into a synth
 
-A modulator that **generates discrete notes** (`randomnotes` and
-`markovpercs` — see [objects.md](objects.md#modulators-type-on-add_modulator))
+A modulator that **generates discrete notes** (`randomnotes`, `markovpercs`,
+`euclidpercs`, `patternvariator` and `chorale` — see
+[objects.md](objects.md#modulators-type-on-add_modulator))
 instead of a continuous signal can be patched straight into a track's control
 input, alongside — not instead of — anything you `add_event`'d by hand:
 
@@ -307,6 +324,18 @@ input, alongside — not instead of — anything you `add_event`'d by hand:
 /add_track name=lead
 /add_modulator type=randomnotes name=rand1 probability=0.7 min_gap=0.5 scale=0,2,4,5,7,9,11
 /patch source=rand1 dest=lead.notes
+```
+
+Note `depth` is meaningless on a `.notes` patch and is omitted. Several
+generators can feed one track, and one generator can feed several — a
+`chorale` patched into two tracks plays both the identical voicing:
+
+```
+/add_track name=pad synth=tapepad
+/add_track name=glass synth=karplus
+/add_modulator type=chorale name=bed mode=aeolian progression=0,5,3,4
+/patch source=bed dest=pad.notes
+/patch source=bed dest=glass.notes
 ```
 
 `lead` now plays whatever `rand1` generates, on top of any events already on
@@ -382,6 +411,77 @@ to the value over time instead of setting it instantly:
 Ramping is about *how a value travels* between two numbers. When it should
 *start* is a separate control — see [Scheduling with `at=`](#scheduling-with-at),
 which applies to far more than ramps.
+
+## Randomizing
+
+Any param accepts the literal value `random` in place of a number. It draws
+one value uniformly from the param's declared range, and is otherwise an
+ordinary value — so it ramps and defers like any other:
+
+```
+/lead cutoff=random              cutoff=7833.291
+/lead cutoff=random 4b           glides to a drawn value over 4 beats
+/lead cutoff=random at=cycle     drawn now, applied at the top of the next loop
+/reverb wet=random               works on any processor or modulator param too
+```
+
+`min=`/`max=` narrow the draw. They apply to every `=random` on that line
+(two params wanting different ranges are two lines), and either one alone
+falls back to the param's own bound:
+
+```
+/lead cutoff=random min=200 max=2000    somewhere in the low-mids
+/lead cutoff=random max=800             anywhere from the param's floor up to 800
+```
+
+The bare flag `random` draws a new value for **every** param on the object at
+once. On a track that means the channel's params *and* its synth's:
+
+```
+/lead random           wow=97.199; flutter=64.025; cutoff=8476.183; ... ; pan=-0.061
+/lead random=4b        the same roll, but glided over 4 beats instead of jumped
+/lead random at=cycle  rolled now, landing on the downbeat
+```
+
+### Which params a bulk `random` touches
+
+Every param carries an `r` flag, on by default, that decides whether the bulk
+command includes it:
+
+```
+/lead cutoff.r=false   leave cutoff alone from now on
+/lead cutoff.r=true    put it back
+/master gain.r=true    opt master's fader in (it ships out — see below)
+```
+
+`/name help` marks anything the bulk command will skip:
+
+- `[no random: .r=false]` — you turned it off. `gain` on every channel ships
+  this way: a random fader isn't a new sound, it's a track that vanished.
+  Everything else ships on.
+- `[no random: unbounded]` — the param has no full range to draw from, so
+  there's nothing to pick between. Only three params are like this: a patch's
+  `depth`, a `cv` modulator's `value`, and a send's `send_gain`. Naming one
+  explicitly still works, it just needs bounds: `/patch id=x1 depth=random
+  min=0 max=1`. Without them you get
+  `depth has no declared range — give min= and max= to randomize it`.
+
+The `r` flags are saved with the session and restored by `/save`/`/recall`
+and by loading a session file.
+
+Two things worth knowing before leaning on this:
+
+- **The draw is uniform over the declared range, which is a clamp, not a
+  taste.** `lfo1 freq` is bounded `0..20000` because that's what the
+  oscillator accepts, so `/lfo1 random` will almost never give you something
+  that reads as an LFO. Wide ranges (`cutoff` at `40..16000`) skew bright for
+  the same reason. `min=`/`max=` is the answer; the draw is deliberately not
+  secretly logarithmic for some params and linear for others.
+- **Options are not included.** `random` only touches params. A synth's
+  `waveform`, a pattern's `seed`, a sampler's kit are discrete settings, and
+  the ones worth re-rolling already have their own form: `seed=random`,
+  `samples=random`, `pattern=random` (see
+  [Params vs. options](#params-vs-options)).
 
 ## Scheduling with `at=`
 
@@ -479,7 +579,9 @@ lists them separately:
 
 - A **param** (`gain`, `wet`, `freq`, `probability`, `dropout`, ...) is backed
   by a real Web Audio `AudioParam`: it can be ramped (`wet=0.9 6b`), patched
-  into (`/patch dest=reverb.wet`), and loop-automated (`automate=wet ...`).
+  into (`/patch dest=reverb.wet`), loop-automated (`automate=wet ...`), and
+  randomized (`wet=random`, or in bulk via `random` — see
+  [Randomizing](#randomizing)).
 - An **option** (`waveform`, `scale`, a reverb's `duration`/`decay`, a
   delay's `stereoOffset`, a sampler's `samples`, a generator's `seed`/`preset`)
   is a plain setting with no AudioParam behind it — settable at runtime the

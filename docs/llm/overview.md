@@ -196,7 +196,7 @@ running (this is exactly what `SessionPage.svelte`'s `onMount` cleanup is for).
   which is what a regenerating unit needs; `cycleIndex` is monotonic but **not
   necessarily contiguous**, since a stall skips cycles rather than replaying
   them (regenerating for cycles nobody will hear is worse than landing on the
-  current one). **No shipped type consumes it yet** — all four generators index
+  current one). **No shipped type consumes it yet** — all five generators index
   `generateEvents` straight off the absolute beat, which sidesteps needing it,
   and `patternvariator` deliberately regenerates only on reseed. Its own `_tick()` is wrapped in a
   try/catch so one bad event/param can only drop a single scheduling pass, never
@@ -266,9 +266,9 @@ opening any source file, and update it whenever a type is added or removed.
 
 `src/ribbit.js`:
 ```js
-const SYNTH_TYPES = { oscsynth: RibbitOscSynth, sampler: RibbitSampler, percsampler: RibbitPercSampler, karplus: RibbitKarplus, granular: RibbitGranular, tapepad: RibbitTapePad };
+const SYNTH_TYPES = { oscsynth: RibbitOscSynth, sampler: RibbitSampler, percsampler: RibbitPercSampler, karplus: RibbitKarplus, granular: RibbitGranular, tapepad: RibbitTapePad, chaossynth: RibbitChaosSynth, czsynth: RibbitCZSynth };
 const PROCESSOR_TYPES = { reverb: RibbitReverb, delay: RibbitDelay, compressor: RibbitCompressor, saturator: RibbitSaturator, tilt: RibbitTilt, limiter: RibbitLimiter, goodenizer: RibbitGoodenizer };
-const MODULATOR_TYPES = { lfo: RibbitLFO, randomnotes: RibbitRandomNotes, cv: RibbitCV, markovpercs: RibbitMarkovPercs, euclidpercs: RibbitEuclidPercs, patternvariator: RibbitPatternVariator };
+const MODULATOR_TYPES = { lfo: RibbitLFO, randomnotes: RibbitRandomNotes, cv: RibbitCV, markovpercs: RibbitMarkovPercs, euclidpercs: RibbitEuclidPercs, patternvariator: RibbitPatternVariator, chorale: RibbitChorale };
 ```
 
 Non-base implementations live one folder down from `src/`, grouped by
@@ -493,6 +493,23 @@ param's value/range plus every command it accepts, each with a usage note
 (`channelHelp`/`paramObjectHelp` in `commands.js`; a param's range is omitted
 when it was never given `min`/`max` bounds, e.g. a patch's `depth` —
 deliberately unbounded, since a negative depth inverts the modulation).
+
+**Randomizing.** Any param takes the literal value `random` in place of a
+number (`/lead cutoff=random`), drawn uniformly from its declared range;
+line-level `min=`/`max=` narrow it, either alone falling back to the param's
+own bound. It resolves in `applyParams` before the ramp/instant branch, so it
+ramps (`cutoff=random 4b`) and defers (`at=cycle`) like any other value — the
+draw happens at command time, so a deferred one reports its actual number.
+The bare flag `random` on any object rolls every included param at once
+(`randomizeAll` synthesizes an all-`random` input and reuses `applyParams`);
+`random=4b` ramps the whole roll. On a channel it covers `addressableParams`
+— the channel's params *and* its synth's. Per-param inclusion is the `.r`
+attribute (`/lead cutoff.r=false`), the only dotted key the grammar accepts,
+persisted as `no_random` (see `session.js`). A param needs `min` *and* `max`
+finite to be drawable at all: only `patch.depth`, `cv.value` and a send's
+`gain` fail that, and naming one explicitly errors with a request for bounds.
+Channel `gain` is the only param that ships `randomizable: false`. Options are
+excluded entirely — they have their own `seed=random`/`samples=random`.
 `/clock` supports `bpm=` (rampable) and `num_beats=` (deliberately not
 rampable — rejected with a message if given a ramp spec).
 
@@ -505,9 +522,11 @@ either endpoint.
 
 An event-generating modulator (`randomnotes`, which re-rolls continuously —
 `/add_modulator type=randomnotes probability=0.7 min_gap=0.5
-scale=0,2,4,5,7,9,11 name=rand1`; or `markovpercs`, which generates one fixed
+scale=0,2,4,5,7,9,11 name=rand1`; `markovpercs`, which generates one fixed
 pattern and loops it until reseeded — `/add_modulator type=markovpercs
-style=broken seed=31415 name=rhy`) patches into a track's synth instead of a
+style=broken seed=31415 name=rhy`; or `chorale`, which holds overlapping
+sustained voices through a chord progression — `/add_modulator type=chorale
+mode=aeolian progression=0,5,3,4 name=bed`) patches into a track's synth instead of a
 param, via the reserved destination `dest=<track>.notes` (e.g. `/patch
 source=rand1 dest=track_1.notes`) — no `depth=`, and it runs alongside,
 never replacing, whatever `add_event` already put on that track. Only a
@@ -672,21 +691,28 @@ and do nothing.
   precisely what a first-order chain structurally cannot do). Still missing:
   a step-string parser (`kicks=x..x..x.`), which would slot into the same
   contract. No per-cycle/every-N-cycle regeneration hook exists either,
-  Four generation shapes now exist, the fourth being **hand-authored material,
+  Five generation shapes now exist. The fourth is **hand-authored material,
   varied** (`patternvariator`) — the only one whose input is a file a person
-  wrote rather than a rule. A step-string parser is no longer a gap: the
+  wrote rather than a rule. The fifth is **sustained harmony** (`chorale`) —
+  the only one that isn't producing a rhythm at all, and the only one with no
+  randomness anywhere in it: every note is a pure function of the absolute
+  beat, so there is no seed and nothing to reproduce. A step-string parser is no longer a gap: the
   `drums` pattern kind *is* one (`kicks: "x..x..x."`), it just lives in a file
   rather than on the command line, since sixteen characters don't survive
   `splitCommands`.
   An `onCycle(cycleIndex)` clock hook now exists for per-N-cycle regeneration
   (see `RibbitClock`), but **nothing consumes it yet** —
   `generateEvents(fromBeat, toBeat)`'s absolute-beat design sidesteps needing
-  it for all four generators, and `patternvariator` regenerates only on reseed
+  it for all five generators, and `patternvariator` regenerates only on reseed
   by deliberate choice: a pattern that quietly rewrites itself while you're
   working on something else is very hard to play with.
 - The harmony context is a live key/scale (`/harmony root= scale=`), not a
-  full harmony *system* — no chords, progressions, or per-track scale
-  overrides, just the one shared context every `degree=` resolves against.
+  full harmony *system* — no per-track scale overrides, just the one shared
+  context every `degree=` resolves against. Chords and progressions exist only
+  *inside* `chorale` (its `mode`/`progression`/`chord_size`/`stack` options),
+  which emits plain degrees like anything else; nothing else in the engine
+  knows what chord is currently sounding, and there is no shared notion of
+  "the current chord" a second generator could follow.
 - **`patternvariator` never invents material outside its source.** Rhythms
   lose hits, gain ghosts, or nudge one step; pitched material is varied against
   the pattern's *own* pitch-class vocabulary (inversion, octave displacement,
@@ -701,10 +727,52 @@ and do nothing.
   around 375Hz). Consequence: pitch quantizes to a whole number of samples, so
   error stays within ~6 cents to C6 and widens to ~22 cents by G6. Nothing is
   cached — a fresh noise burst per pluck is the point.
+- **`chaossynth` renders per note too, and for a sharper version of the same
+  reason.** It's a recreation of a Max/MSP patch (`.claude/context/
+  regression.maxpat`): two cross-coupled voices, each an oscillator through an
+  `atan` saturator into a resonant lowpass whose cutoff is driven by that
+  voice's own loudness. Both feedback loops are **single-sample** — a 128-sample
+  lag in the cross coupling makes it a different dynamical system, not a
+  slightly worse one — and the envelope follower in the inner loop has no node
+  equivalent at all. Two substitutions are deliberate and documented in the
+  source: `lores~` → a Chamberlin SVF (its cutoff is remodulated every 64
+  samples, and a biquad recomputing coefficients that fast can go unstable),
+  and `fluid.loudness~` → a one-pole RMS follower read at the patch's own
+  `@hopsize 64`. Costs ~5.6ms per 2-second note (measured), capped at 8s.
+- **`czsynth` renders per note for the clearest version of that reason yet:**
+  phase distortion is a per-sample nonlinearity whose *shape* is moved by an
+  envelope, and `WaveShaperNode` reshapes amplitude from a fixed array. A
+  linear phase ramp is bent by a piecewise-linear transfer function and read
+  out of a cosine table; the DCW envelope morphs that function between the
+  identity (so DCW 0 is a sine for *every* waveform) and its bent extreme.
+  Two lines, each `DCO → DCW → DCA` with an eight-stage envelope on all three.
+  ~0.35ms per second of audio per line, capped at 12s; mono, because the
+  CZ-101 is. Three things that look like bugs and aren't: `reso1/2/3` are hard
+  sync through a per-cycle window rather than phase distortion (so `dcw` moves
+  a frequency there), a *combination* preset alternates two waveforms per
+  period and so sounds a sub-octave, and the envelope rate-to-seconds curve is
+  **fitted** because Casio never published one.
+- **`czsynth` is the only synth with a preset library**, because a CZ tone is
+  ~90 numbers. `synths/cz-tones.js` holds 28 patches decoded from sysex; every
+  `param` is a modifier over the selected tone, and every option but `preset`
+  takes the sentinel `"preset"` meaning "use the tone's value" — which is what
+  stops the two layers writing to each other. `lines`/`octave` declare no
+  `choices`: the console coerces numeric-looking values to Numbers before
+  `applyOptions`' strict `includes()`, so a declared `"1"` can never match a
+  typed `1` (same reason `tapepad`'s `voices`/`bits` validate in `set()`).
+- **`chaossynth` is the one synth where a MIDI note isn't a pitch.** `seed`
+  builds one configuration of all ten control points per MIDI note (0..127), so
+  a note selects a *state*; `spread` lerps from the hand-set params toward that
+  note's configuration (0 = params only, 1 = seeded state outright), and
+  `pitch_track` decides how much the note additionally transposes. The
+  consequence worth knowing: **any** event generator becomes a timbre
+  sequencer when patched at it. Its events use `pitch` rather than `degree` in
+  the shipped session on purpose — a degree resolves against `/harmony`, so
+  moving the root would silently renumber every state.
 - Synth-level rampable `params` are live on `percsampler`
   (`dynamics`/`pan_spread`/`speed_spread`), `karplus`
-  (`damping`/`decay`/`brightness`), `granular` (nine) and `tapepad` (eleven);
-  `oscsynth`/`sampler` declare none. `channelCommand` routes them through the
+  (`damping`/`decay`/`brightness`), `granular` (nine), `tapepad` (eleven),
+  `chaossynth` (fourteen) and `czsynth` (seven); `oscsynth`/`sampler` declare none. `channelCommand` routes them through the
   track's own name (`/hats pan_spread=0.8 4b`), `_resolveDest` falls back to
   `channel.source.params` so they work as `/patch` destinations
   (`dest=hats.pan_spread`), and `addressableParams()` does the same for

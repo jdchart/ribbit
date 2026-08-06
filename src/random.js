@@ -28,3 +28,19 @@ export function mulberry32(seed) {
 export function randomSeed() {
     return Math.floor(Math.random() * 2 ** 31);
 };
+
+// One uniform draw in [min, max] — what a param's `=random` resolves to (see
+// RibbitParam.randomValue). Math.random() rather than mulberry32 for the same
+// reason randomSeed() uses it: the draw is resolved to a concrete number the
+// moment the command runs and *that number* is what gets stored, so the
+// result is already part of the document and has nothing left to reproduce.
+//
+// Uniform in the param's own user-facing domain, not the raw AudioParam one —
+// a channel's gain is a 0-1 taper position and a random fader should be
+// uniform in the units the range is declared in. Deliberately not
+// logarithmic, even for a wide range like a filter's 40..16000: a rule that
+// silently changes shape per param is much harder to predict than one that
+// doesn't, and min=/max= is the answer when the full sweep is too wide.
+export function randomInRange(min, max) {
+    return min + Math.random() * (max - min);
+};
