@@ -2,6 +2,8 @@ import { scheduleRamp, setInstant, scheduleAt, RibbitAutomationEvent } from "./a
 import { RibbitEvent } from "./event.js";
 import { parseDegreeList } from "./harmony.js";
 import { addressableParams } from "./param.js";
+import { normalizeMembers } from "./group.js";
+import { RECORDER_MODES, RECORDER_BIT_DEPTHS } from "./recorder.js";
 import { RESERVED_NAMES } from "./ribbit.js";
 import { snapshotSession, sessionToJSON, loadSession, applySnapshot } from "./session.js";
 
@@ -438,7 +440,15 @@ function applyOptions(ribbit, object, input, timing, exclude = new Set()) {
             results.push(`${key} can't be ramped — use ${key}=<value>`);
             continue;
         }
-        if (option.choices && !option.choices.includes(spec)) {
+        // Compared as text, not by identity: parseValue coerces every
+        // numeric-looking token to a Number before it ever gets here, so an
+        // option declaring "1" or "-1" (czsynth's lines/octave, tapepad's
+        // voices/bits) could never match a typed 1/-1 under a strict
+        // includes(). Those four each validated in their own set() and gave up
+        // ghost-text completion to work around it; stringifying both sides is
+        // the one place that has to know, and a choices list is a set of
+        // *words* the console spells out anyway.
+        if (option.choices && !option.choices.some((choice) => String(choice) === String(spec))) {
             results.push(`invalid ${key} "${spec}" (expected ${option.choices.join(", ")})`);
             continue;
         }
@@ -594,6 +604,16 @@ function removeAutomationCommand(ribbit, object, rawIndex, timing) {
 // Builds the one-line status string for a channel (master, a track, or a
 // bus), shown both for `/track_1` with no params and inside `/tracks`/`/buses`.
 function channelSummary(channel) {
+    // Why this channel is (or isn't) passing signal, when it's worth saying.
+    // "silenced" is the passive case — this channel didn't ask for anything,
+    // something else soloed — and is the one people otherwise waste a minute
+    // on, staring at a fader that's up on a track making no sound.
+    const flags = [
+        channel.muted ? "muted" : null,
+        channel.soloed ? "solo" : null,
+        channel._soloSilenced ? "silenced by solo" : null,
+    ].filter(Boolean);
+    const state0 = flags.length ? ` [${flags.join(", ")}]` : "";
     const gain = `gain=${channel.params.gain.get().toFixed(2)}`;
     const pan = `pan=${channel.params.pan.get().toFixed(2)}`;
     const inserts = channel.processors.length
@@ -612,7 +632,7 @@ function channelSummary(channel) {
     // this the only way to know what a track is actually playing is to read
     // the session file.
     const state = channel.source?.describeState?.();
-    return `${channel.name} — ${gain} ${pan} inserts=[${inserts}] sends=[${sends}]${synth}${state ? ` ${state}` : ""}`;
+    return `${channel.name}${state0} — ${gain} ${pan} inserts=[${inserts}] sends=[${sends}]${synth}${state ? ` ${state}` : ""}`;
 };
 
 // Full reference text for `/track_1 help` (also master/any bus) — everything
@@ -660,6 +680,12 @@ function channelHelp(ribbit, channel) {
         lines.push("  events / remove_event=<n>        list this synth's events with indices / remove one by index");
         lines.push("  clear_events                     empty this synth's pattern");
         lines.push("  start / stop                     pause/resume this synth's transport (routing untouched)");
+    }
+    lines.push("  mute / unmute                    silence this channel (and its sends) without moving the fader; mute=false also unmutes");
+    if (channel !== ribbit.master) {
+        lines.push("  solo / unsolo                    hear only the soloed channels — anything sending into one, or fed by one, stays audible too");
+    }
+    if (channel.source) {
         lines.push(`  (this synth can also receive generated notes alongside add_event: /patch source=<generator> dest=${channel.name}.notes)`);
     } else {
         lines.push("  (no synth here — add_event/clear_events/start/stop/synth= are no-ops on master/buses)");
@@ -711,6 +737,7 @@ const CHANNEL_COMMAND_KEYS = new Set([
     "at", "out", "add_send", "send_gain", "remove_send", "send",
     "add_event", "beat", "pitch", "degree", "velocity", "duration",
     "events", "remove_event", "clear_events", "start", "stop", "synth",
+    "mute", "unmute", "solo", "unsolo",
     "automate", "from", "to", "curve", "once",
     "automations", "remove_automation", "clear_automation",
     "add_processor", "remove_processor", "remove_self", "help",
@@ -946,6 +973,33 @@ function channelCommand(ribbit, channel, params) {
         }
     }
 
+    // Mute and solo, the other two boundary-shaped gestures alongside
+    // start/stop above — and the reason they're separate from gain: a mute
+    // has to be undoable to exactly where the fader was, including mid-ramp,
+    // which "set gain to 0" isn't (see RibbitChannel's muteGain).
+    //
+    // Each takes an optional value so both `/kick mute` and `/kick mute=false`
+    // work (a bare flag parses as true), with unmute/unsolo as the readable
+    // form of the second. Solo is refused on master, where it would mean
+    // "silence everything except everything".
+    for (const [key, negativeKey, past, unpast, apply] of [
+        ["mute", "unmute", "muted", "unmuted", (ch, on) => ch.setMuted(on)],
+        ["solo", "unsolo", "soloed", "unsoloed", (ch, on) => ch.setSoloed(on)],
+    ]) {
+        const asked = key in params || params[negativeKey] === true;
+        if (!asked) continue;
+        if (key === "solo" && channel === ribbit.master) {
+            results.push("master can't be soloed — everything already goes through it");
+            continue;
+        }
+        const on = params[negativeKey] === true ? false : params[key] !== false;
+        const done = on ? past : unpast;
+        results.push(runAt(ribbit, timing, `${channel.name} will be ${done}`, () => {
+            apply(channel, on);
+            return `${channel.name} ${done}`;
+        }));
+    }
+
     if ("synth" in params) {
         if (!channel.source) {
             results.push(`${channel.name} has no synth`);
@@ -1062,6 +1116,11 @@ function paramObjectHelp(ribbit, object) {
     lines.push("  remove_self                      remove and delete this object");
     if (typeof object.generateEvents === "function") {
         lines.push(`  (this modulator generates note events — feed a synth: /patch source=${object.name} dest=<track>.notes)`);
+    } else if (typeof object.onSchedule === "function") {
+        // The third shape (randomgestures): it neither publishes a signal nor
+        // generates notes, it acts on other objects itself — so the one thing
+        // a reader needs told is that there is nothing to patch.
+        lines.push(`  (this modulator acts on the session directly — no patch needed; aim it with scope= and targets=)`);
     } else {
         lines.push(`  (this object's output can be a patch source: /patch source=${object.name} dest=<name.param>)`);
     }
@@ -1151,9 +1210,186 @@ function modulatorCommand(ribbit, modulator, params) {
     return paramObjectCommand(ribbit, modulator, params, () => ribbit.removeModulator(modulator));
 };
 
+// --- groups -------------------------------------------------------------
+//
+// A group is a name that stands for several other names (see group.js): every
+// key on the line that isn't one of the group's own is forwarded verbatim to
+// each member's own command handler. So groupCommand contains no knowledge of
+// gain, or synths, or processors — it resolves names and re-runs the command,
+// which is why a group works with commands written long before it existed
+// (and will work with ones written after).
+
+// Anything a group can name as a member: any addressable object, or another
+// group.
+function groupMemberExists(ribbit, name) {
+    return !!(ribbit._resolveObject(name) ?? ribbit._resolveGroup(name));
+};
+
+function groupSummary(ribbit, group) {
+    if (!group.members.length) {
+        return `${group.name} — empty group (add members with members=a,b,c or add_member=<name>)`;
+    }
+    // A member that no longer resolves is marked rather than hidden: members
+    // are names, so a torn-down track leaves its name behind on purpose (a
+    // /recall that rebuilds it puts the group back in business), and silently
+    // dropping it would make a group quietly shrink over a session.
+    const members = group.members
+        .map((name) => (groupMemberExists(ribbit, name) ? name : `${name}(missing)`))
+        .join(", ");
+    return `${group.name} — ${group.members.length} member${group.members.length === 1 ? "" : "s"}: ${members}`;
+};
+
+function groupHelp(ribbit, group) {
+    return [
+        groupSummary(ribbit, group),
+        "",
+        "A group holds no audio. Every other key on the line is run against each",
+        "member, exactly as if you had typed it at each of them in turn — so",
+        `"/${group.name} gain=0 4b at=cycle" fades all of them together, and`,
+        `"/${group.name} random" rolls all of them.`,
+        "",
+        "commands:",
+        "  members=a,b,c                    replace the membership (any track/bus/master/processor/modulator, or another group)",
+        "  add_member=<name> / remove_member=<name>   add or drop one",
+        "  remove_self                      delete the group (its members are untouched)",
+        "  at=beat|cycle                    forwarded along with everything else, so every member lands on the same boundary",
+        "  help                             show this text",
+        "",
+        "Members that don't currently resolve are skipped (and marked above);",
+        "a key a given member doesn't understand is reported by that member.",
+    ].join("\n");
+};
+
+// Everything groupCommand consumes itself. `at` is in the list but is also
+// forwarded — deferring is exactly the kind of thing you want applied to the
+// whole group at once.
+const GROUP_COMMAND_KEYS = new Set(["at", "members", "add_member", "remove_member", "remove_self", "help"]);
+
+// `dispatch(name)` resolves a member name to the same handler executeOne would
+// use for it (see createCommandRouter's objectHandler) — passed in rather than
+// imported, because that lookup closes over the live router. `seen` carries
+// the groups already entered on this line, so a group containing itself (or
+// two groups containing each other) forwards once and stops instead of
+// recursing forever.
+function groupCommand(ribbit, group, params, dispatch, seen = new Set()) {
+    if (params.help) return groupHelp(ribbit, group);
+    if (Object.keys(params).length === 0) return groupSummary(ribbit, group);
+
+    const { warning, ...timing } = resolveStartTime(ribbit.clock, params.at);
+    const results = warning ? [warning] : [];
+
+    if (params.remove_self) {
+        return runAt(ribbit, timing, `${group.name} will be removed`, () => {
+            ribbit.removeGroup(group);
+            return `${group.name} removed (members untouched)`;
+        });
+    }
+
+    // Membership edits validate before they defer, like every other name a
+    // command takes (see runAt) — a typo'd member has to be an error now, not
+    // a silent no-op on the next cycle boundary.
+    if ("members" in params) {
+        const wanted = normalizeMembers(params.members);
+        const unknown = wanted.filter((name) => !groupMemberExists(ribbit, name));
+        if (unknown.length) {
+            results.push(`unknown member${unknown.length === 1 ? "" : "s"} ${unknown.map((n) => `"${n}"`).join(", ")}`);
+        } else {
+            results.push(runAt(ribbit, timing, `members will be set to ${wanted.join(", ")}`, () => {
+                group.setMembers(wanted);
+                return `members: ${group.members.join(", ") || "(none)"}`;
+            }));
+        }
+    }
+
+    if ("add_member" in params) {
+        const name = String(params.add_member);
+        if (name === group.name) results.push(`a group can't contain itself`);
+        else if (!groupMemberExists(ribbit, name)) results.push(`unknown member "${name}"`);
+        else {
+            results.push(runAt(ribbit, timing, `${name} will be added`, () => (
+                group.add(name) ? `added ${name} (${group.members.length} members)` : `${name} is already a member`
+            )));
+        }
+    }
+
+    if ("remove_member" in params) {
+        const name = String(params.remove_member);
+        results.push(runAt(ribbit, timing, `${name} will be removed from ${group.name}`, () => (
+            group.remove(name) ? `removed ${name} (${group.members.length} members)` : `${name} isn't a member of ${group.name}`
+        )));
+    }
+
+    const forwarded = Object.fromEntries(Object.entries(params).filter(([key]) => !GROUP_COMMAND_KEYS.has(key)));
+    if (Object.keys(forwarded).length) {
+        if ("at" in params) forwarded.at = params.at;
+        const nested = new Set([...seen, group.name]);
+        for (const name of group.members) {
+            if (nested.has(name)) continue; // already entered on this line
+            const handler = dispatch(name);
+            if (!handler) {
+                results.push(`${name}: not found`);
+                continue;
+            }
+            // One member throwing (a bad number, an option setter refusing)
+            // mustn't take the rest of the group down with it — the whole
+            // point is that the other five still get the command.
+            try {
+                results.push(`${name}: ${handler(forwarded, nested)}`);
+            } catch (error) {
+                results.push(`${name}: error — ${error.message}`);
+            }
+        }
+    }
+
+    if (!results.length) return groupSummary(ribbit, group);
+    return results.join("\n");
+};
+
+// Same idea as CHANNEL_ACTION_KEYWORDS, for a group. Deliberately short: a
+// group's *other* valid keys are whatever its members accept, which varies per
+// group and isn't worth guessing at.
+const GROUP_ACTION_KEYWORDS = [
+    "members=", "add_member=", "remove_member=", "at=", "remove_self", "help",
+];
+
 // One-line summary for /patches, e.g. "x1: lfo1 -> reverb.wet (depth 0.30)" —
 // or, for an event patch (no depth — see RibbitEventPatch), "x2: rand1 ->
 // track_1.notes (generated notes)".
+// The three recorder settings, shared by /record (which applies them and then
+// starts) and /recording (which applies them and reports) so the two can't
+// drift on what a setting means or how it's validated. Returns the "what
+// changed" fragments; an unknown value throws out of the setter, which run()
+// turns into a command error.
+function applyRecorderSettings(recorder, params) {
+    const results = [];
+    if ("mode" in params) results.push(`mode=${recorder.setMode(String(params.mode))}`);
+    if ("bits" in params) results.push(`bits=${recorder.setBits(params.bits)}`);
+    if ("max_minutes" in params) results.push(`max_minutes=${recorder.setMaxMinutes(params.max_minutes)}`);
+    return results;
+};
+
+function recorderHelp(recorder) {
+    return [
+        recorder.describe(),
+        ``,
+        `/record [mode=] [bits=] [max_minutes=] [at=beat|cycle]  start recording`,
+        `/stop_record [at=beat|cycle]                            stop`,
+        `/save_record                                            download the take`,
+        `/clear_record                                           discard the take`,
+        `/recording [mode=] [bits=] [max_minutes=]               status, or change a setting`,
+        ``,
+        `mode=${RECORDER_MODES.join("|")} — stereo taps master only; multitrack taps every track,`,
+        `  bus and master as its own file, downloaded together as a .zip.`,
+        `bits=${RECORDER_BIT_DEPTHS.join("|")} — 32 is float (lossless, survives going over 0dBFS); 16 is PCM`,
+        `  (half the size, clips anything over full scale).`,
+        `max_minutes=<n> — safety stop; a take is raw audio held in memory.`,
+        ``,
+        `Taps are post-fader, so a muted or soloed-out channel records silence.`,
+        `The channel list is fixed when recording starts — a track added mid-take`,
+        `is not in it. Nothing is captured while the engine is stopped.`,
+    ].join("\n");
+};
+
 function patchSummary(patch) {
     const detail = patch.params.depth ? `depth ${patch.depth.value.toFixed(2)}` : "generated notes";
     return `${patch.id}: ${patch.sourceName} -> ${patch.destName} (${detail})`;
@@ -1170,6 +1406,7 @@ function patchSummary(patch) {
 // convention).
 const CHANNEL_ACTION_KEYWORDS = [
     "add_event", "events", "remove_event=", "clear_events", "start", "stop",
+    "mute", "unmute", "solo", "unsolo",
     "synth=", "add_processor=", "remove_processor=", "out=", "add_send=",
     "remove_send=", "send=", "at=",
     "automate=", "automations", "remove_automation=", "clear_automation",
@@ -1233,6 +1470,7 @@ const TOP_LEVEL_KEYWORDS = {
     clock: ["bpm=", "num_beats=", "at="],
     harmony: ["root=", "scale=", "at="],
     add_modulator: ["type=", "name="],
+    add_group: ["name=", "members="],
     // min=/max= only mean anything alongside depth=random on an existing
     // patch (a patch's depth is deliberately unbounded, so a draw there has
     // no range of its own to fall back on — see RibbitParam.randomValue).
@@ -1241,6 +1479,9 @@ const TOP_LEVEL_KEYWORDS = {
     save: ["name=", "at="],
     recall: ["name=", "at="],
     remove_state: ["name=", "at="],
+    record: ["mode=", "bits=", "max_minutes=", "at=", "help"],
+    stop_record: ["at="],
+    recording: ["mode=", "bits=", "max_minutes=", "help"],
 };
 
 // Every name addressable as `/name`, for completing the command/object-name
@@ -1251,7 +1492,10 @@ const TOP_LEVEL_KEYWORDS = {
 // without it, typing "/trac" would suggest the built-in `/tracks` (a valid
 // prefix match) ahead of an actual track named "track_1".
 function addressableNames(ribbit, topLevelNames) {
-    return [...objectNames(ribbit), ...topLevelNames];
+    // Groups are addressable as /name but are NOT in objectNames (see there):
+    // they can't be a send destination or a patch endpoint, so they belong in
+    // this list and not that one.
+    return [...objectNames(ribbit), ...ribbit.groups.map((g) => g.name), ...topLevelNames];
 };
 
 // Just the "things with a name" half of addressableNames — no top-level
@@ -1277,6 +1521,10 @@ function resolveObjectFor(ribbit, name) {
         ?? ribbit.buses.find((b) => b.name === name)
         ?? ribbit.processors.find((p) => p.name === name)
         ?? ribbit.modulators.find((m) => m.name === name)
+        // A group has no params/options/sends of its own, so every other
+        // branch of resolveValueCandidates skips straight past it — it's here
+        // for remove_member=, which completes from its membership.
+        ?? ribbit.groups.find((g) => g.name === name)
         ?? null;
 };
 
@@ -1292,6 +1540,20 @@ function resolveKeywordsFor(ribbit, name) {
 
     const paramObject = ribbit.processors.find((p) => p.name === name) ?? ribbit.modulators.find((m) => m.name === name);
     if (paramObject) return paramObjectKeywordsFor(paramObject);
+
+    // A group's own keys, plus whatever its *first* member accepts — a group
+    // is nearly always homogeneous (four drum tracks, three reverbs), so
+    // completing from one member is right far more often than not, and
+    // completing nothing at all would make the whole feature feel like it
+    // stops working the moment you address a group.
+    const group = ribbit.groups.find((g) => g.name === name);
+    if (group) {
+        const first = group.members.map((member) => resolveObjectFor(ribbit, member)).find(Boolean);
+        const memberKeywords = !first ? []
+            : first.params && "gain" in first.params ? channelKeywordsFor(first)
+            : paramObjectKeywordsFor(first);
+        return [...GROUP_ACTION_KEYWORDS, ...memberKeywords];
+    }
 
     if (name in TOP_LEVEL_KEYWORDS) return TOP_LEVEL_KEYWORDS[name];
     return null;
@@ -1309,9 +1571,25 @@ function resolveValueCandidates(ribbit, commandName, resolvedObject, key) {
     if (key === "synth") return ribbit.synthTypes;
     if (key === "add_processor") return ribbit.processorTypes;
     if (key === "type" && commandName === "add_modulator") return ribbit.modulatorTypes;
+    // Scoped to the two recorder commands: "mode" is also an svf/comb option
+    // and "bits" a tapepad one, and those must keep completing from their own
+    // choices rather than from the recorder's.
+    if (commandName === "record" || commandName === "recording") {
+        if (key === "mode") return RECORDER_MODES;
+        if (key === "bits") return RECORDER_BIT_DEPTHS.map(String);
+    }
     if (key === "name" && (commandName === "recall" || commandName === "remove_state")) return Object.keys(ribbit.states);
     if (key === "id" && (commandName === "patch" || commandName === "unpatch")) return ribbit.patches.map((p) => p.id);
     if (key === "out" || key === "add_send" || key === "source" || key === "dest") return objectNames(ribbit);
+    // A member can be any addressable object *or* another group. Only useful
+    // for the first name in a comma list (a partial like "kick,sn" prefixes
+    // nothing), which is still the common case of naming one member.
+    // randomgestures' targets= names objects and groups the same way, so it
+    // completes from the same list.
+    if (key === "members" || key === "add_member" || (key === "targets" && resolvedObject?.options?.targets)) {
+        return [...objectNames(ribbit), ...ribbit.groups.map((g) => g.name)];
+    }
+    if (key === "remove_member" && resolvedObject?.members) return resolvedObject.members;
     if (key === "remove_processor" && resolvedObject?.processors) return resolvedObject.processors.map((p) => p.id);
     if ((key === "remove_send" || key === "send") && resolvedObject?.sends) return resolvedObject.sends.map((s) => s.id);
     if (key === "curve") return AUTOMATION_CURVES;
@@ -1387,7 +1665,15 @@ function suggestCompletion(ribbit, topLevelNames, input, cursorPos) {
     if (firstSpace === -1) {
         const partial = typed.slice(1);
         if (!partial) return null;
-        const match = pickBestMatch(addressableNames(ribbit, topLevelNames), partial);
+        const names = addressableNames(ribbit, topLevelNames);
+        // A name that is already exactly a command/object isn't a partial —
+        // it's the answer, and completing past it would submit a *different*
+        // command, since the console accepts and submits ghost text on Enter.
+        // `/record` is a strict prefix of `/recording`, so without this the
+        // main recording command is untypeable; the same holds for a track
+        // named "kick" alongside one named "kick2".
+        if (names.includes(partial)) return null;
+        const match = pickBestMatch(names, partial);
         return match ? { start: lastSlash + 1, end: cursorPos, full: match } : null;
     }
 
@@ -1413,6 +1699,15 @@ function suggestCompletion(ribbit, topLevelNames, input, cursorPos) {
         if (!valuePartial) return null;
         const candidates = resolveValueCandidates(ribbit, name, resolveObjectFor(ribbit, name), key);
         if (!candidates) return null;
+        // A partial that is already exactly one of the candidates isn't a
+        // partial — it's the answer. Suggesting past it is actively harmful
+        // here, because the console accepts *and submits* ghost text on
+        // Enter: with czsynth's line-select choices ("1", "2", "1+1", "1+2"),
+        // typing `lines=1` and hitting Enter would otherwise run `lines=1+1`.
+        // The /name token needs the same guard (see above). A *key* doesn't:
+        // one that exactly matches ("gain") completes to "gain=", which is
+        // still the same key and is what you wanted.
+        if (candidates.some((candidate) => String(candidate) === valuePartial)) return null;
         const match = pickBestMatch(candidates, valuePartial);
         return match ? { start: tokenStart, end: cursorPos, full: `${key}=${match}` } : null;
     }
@@ -1610,6 +1905,26 @@ export function createCommandRouter(ribbit) {
             if (ribbit.modulators.length === 0) return "no modulators";
             return ribbit.modulators.map(paramObjectSummary).join("\n");
         },
+        // A group is a name standing for several other names, so that one
+        // line can address a whole kit or a whole section (see group.js).
+        // Creation refuses at= like the other three creation commands (see
+        // refusesAt), and for a sharper reason here: a group's entire value
+        // is being addressable, and it can't be addressed before it exists.
+        // Members are validated now rather than at first use — a group whose
+        // members were typos would otherwise look fine until the take.
+        add_group: refusesAt("add_group", (options) => {
+            const members = normalizeMembers(options.members);
+            const unknown = members.filter((name) => !groupMemberExists(ribbit, name));
+            if (unknown.length) {
+                return `unknown member${unknown.length === 1 ? "" : "s"} ${unknown.map((n) => `"${n}"`).join(", ")} — /add_group takes names that already exist (tracks, buses, master, processors, modulators, other groups)`;
+            }
+            const group = ribbit.createGroup({ name: options.name, members });
+            return `created ${group.name}${members.length ? ` (${members.join(", ")})` : " (empty)"}`;
+        }),
+        groups: () => {
+            if (ribbit.groups.length === 0) return "no groups";
+            return ribbit.groups.map((group) => groupSummary(ribbit, group)).join("\n");
+        },
         // A patch is its own standalone thing — a "cable" from any named
         // object's raw output (a modulator, but also a track/master/processor,
         // whose signal can double as a CV source) into any other object's
@@ -1660,6 +1975,57 @@ export function createCommandRouter(ribbit) {
         patches: () => {
             if (ribbit.patches.length === 0) return "no patches";
             return ribbit.patches.map(patchSummary).join("\n");
+        },
+        // Audio capture — see recorder.js. Five commands rather than
+        // subkeywords on one, matching /add_track + /tracks: the two that get
+        // typed mid-performance (/record, /stop_record) are the ones that
+        // have to be short, and both take at= because "record exactly four
+        // cycles" is the gesture this exists for.
+        //
+        // The only asynchronous command besides /load_session, and for a
+        // reason worth stating: compiling the recorder's AudioWorklet module
+        // is a promise, and a deferred start has to be fully synchronous by
+        // the time its boundary arrives — a rejection inside a bare timer has
+        // no command left to report against. So the module is awaited here,
+        // before at= is resolved, and only the (synchronous) start is
+        // deferred.
+        record: async (params) => {
+            if (params.help) return recorderHelp(ribbit.recorder);
+            if (ribbit.recorder.recording) return `already recording — /stop_record first (${ribbit.recorder.describe()})`;
+
+            const settings = applyRecorderSettings(ribbit.recorder, params);
+            await ribbit.recorder.prepare();
+
+            const { help: _help, mode: _mode, bits: _bits, max_minutes: _max, ...timing } = params;
+            const result = scheduled(timing, "will start recording", () => {
+                const take = ribbit.recorder.start();
+                const channels = take.taps.length;
+                return `recording ${ribbit.recorder.mode} (${channels} channel${channels === 1 ? "" : "s"})`;
+            });
+            return [...settings, result].join("; ");
+        },
+        stop_record: (params) => {
+            if (!ribbit.recorder.recording) return "not recording";
+            return scheduled(params, "will stop recording", () => {
+                ribbit.recorder.stop();
+                return `stopped — ${ribbit.recorder.describe()}`;
+            });
+        },
+        // No at=: a download isn't a musical event, and the take is already
+        // finished by definition.
+        save_record: () => ribbit.recorder.save(),
+        clear_record: () => {
+            if (!ribbit.recorder.hasTake && !ribbit.recorder.recording) return "nothing recorded";
+            const was = ribbit.recorder.describe();
+            ribbit.recorder.clear();
+            return `discarded (${was})`;
+        },
+        // The listing counterpart, in the shape /tracks and /patches already
+        // have — and the place to change a setting without starting a take.
+        recording: (params) => {
+            if (params.help) return recorderHelp(ribbit.recorder);
+            const settings = applyRecorderSettings(ribbit.recorder, params);
+            return settings.length ? `${settings.join(", ")} — ${ribbit.recorder.describe()}` : ribbit.recorder.describe();
         },
         // Captures everything live (clock/harmony/master/buses/tracks/
         // modulators/patches — see session.js's snapshotSession) under a
@@ -1777,9 +2143,41 @@ export function createCommandRouter(ribbit) {
         }
     };
 
-    // Dispatch order: built-in top-level commands, then master, then a
-    // matching track name, then a matching bus name, then a matching
-    // processor name, then a matching modulator name.
+    // Resolves an object name to the handler that runs a command against it,
+    // or null. Split out of executeOne because a group needs exactly this
+    // lookup to forward to its members (see groupCommand) — the alternative,
+    // re-entering executeOne with a rebuilt command string, would mean
+    // serializing the params back to text and re-parsing them.
+    //
+    // Order matters and matches the namespace: master, tracks, buses,
+    // processors, modulators, groups. Nothing can collide (see
+    // Ribbit._uniqueName), so the order is only about which lookup runs first.
+    function objectHandler(name) {
+        if (name === "master") return (p) => channelCommand(ribbit, ribbit.master, p);
+
+        const track = ribbit.tracks.find((t) => t.name === name);
+        if (track) return (p) => channelCommand(ribbit, track, p);
+
+        const bus = ribbit.buses.find((b) => b.name === name);
+        if (bus) return (p) => channelCommand(ribbit, bus, p);
+
+        const processor = ribbit.processors.find((p) => p.name === name);
+        if (processor) return (p) => processorCommand(ribbit, processor, p);
+
+        const modulator = ribbit.modulators.find((m) => m.name === name);
+        if (modulator) return (p) => modulatorCommand(ribbit, modulator, p);
+
+        const group = ribbit.groups.find((g) => g.name === name);
+        // The second argument is the only place in this map that takes one:
+        // the set of groups already entered on this line, threaded through so
+        // nested groups can't loop (see groupCommand).
+        if (group) return (p, seen) => groupCommand(ribbit, group, p, objectHandler, seen);
+
+        return null;
+    };
+
+    // Dispatch order: built-in top-level commands first, then any addressable
+    // object (see objectHandler).
     function executeOne(text) {
         if (!text.trim().startsWith("/")) {
             return `unrecognized: "${text}" (commands must start with /)`;
@@ -1794,19 +2192,8 @@ export function createCommandRouter(ribbit) {
 
         if (commands[name]) return run(name, commands[name], params);
 
-        if (name === "master") return run(name, (p) => channelCommand(ribbit, ribbit.master, p), params);
-
-        const track = ribbit.tracks.find((t) => t.name === name);
-        if (track) return run(name, (p) => channelCommand(ribbit, track, p), params);
-
-        const bus = ribbit.buses.find((b) => b.name === name);
-        if (bus) return run(name, (p) => channelCommand(ribbit, bus, p), params);
-
-        const processor = ribbit.processors.find((p) => p.name === name);
-        if (processor) return run(name, (p) => processorCommand(ribbit, processor, p), params);
-
-        const modulator = ribbit.modulators.find((m) => m.name === name);
-        if (modulator) return run(name, (p) => modulatorCommand(ribbit, modulator, p), params);
+        const handler = objectHandler(name);
+        if (handler) return run(name, handler, params);
 
         return `unknown command: /${name}`;
     };

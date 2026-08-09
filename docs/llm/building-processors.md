@@ -58,18 +58,17 @@ export class RibbitMyProcessor extends RibbitProcessor {
   `/<name> random` skips any param without one.
 - Should never be part of a bulk `random` even though it has a range:
   `{ randomizable: false }` (only channel `gain` uses this today).
-- Needs to fan one value out across more than one node **on instant set only**
-  (e.g. `RibbitDelay.time` writing both delayL/delayR):
-  `{ onSet: (value) => { /* write to both */ } }` — pass whichever node is
-  "primary" as the constructor's `audioParam` (that's what ramping/deferred
-  `at=` animates); `onSet` only overrides the plain instant-set path, which is
-  why delay's `time`/`feedback` ramp only one node.
-- Needs to fan out across several nodes **including through ramps** — connect
+- Needs to fan out across several nodes — connect
   one `ConstantSourceNode`'s `.offset` (via `RibbitParamSources`) into every
-  target `AudioParam`, optionally through scaling/inverting gains. Connections
+  target `AudioParam`, setting each target's intrinsic value to 0. Connections
   *sum* onto the intrinsic value, so one param drives all of them through
-  sets, ramps, `at=` and `/patch`. See `RibbitTilt` (two shelf gains, inverted)
-  and `RibbitProcessor.createCrossfade` (two gains, inverted).
+  sets, ramps, `at=` and `/patch`. See `RibbitTilt` (two shelf gains, inverted),
+  `RibbitProcessor.createCrossfade` (two gains, inverted), `RibbitDelay`
+  (both delay lines, plus a second constant for `stereoOffset`) and
+  `RibbitComb` (both branches' delay and feedback).
+  There is also `{ onSet }`, which overrides the *instant-set* path only — so
+  a ramp animates the "primary" node and strands the others. **No shipped param
+  uses it**; reach for the constant-source technique above instead.
 - Not backed by any real `AudioParam` and with nothing to sweep (a value that
   rebuilds a waveshaper curve): make it an **option**, not a param.
 - Not backed by any real `AudioParam` but genuinely sweepable: use

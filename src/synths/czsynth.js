@@ -45,9 +45,9 @@ function cosine(phase) {
 const WAVES = ["saw", "square", "pulse", "doublesine", "sawpulse", "reso1", "reso2", "reso3"];
 const RESO_FIRST = 5;
 
-// The LINE SELECT and OCTAVE switch positions, as strings — see the `lines`
-// option for why these can't be `choices`. "preset" is the sentinel every
-// option but `preset` itself carries, meaning "whatever the tone says".
+// The LINE SELECT and OCTAVE switch positions, as strings. "preset" is the
+// sentinel every option but `preset` itself carries, meaning "whatever the
+// tone says".
 const LINE_SELECTS = ["preset", "1", "2", "1+1", "1+2"];
 const OCTAVES = ["preset", "-1", "0", "1"];
 
@@ -377,13 +377,11 @@ export class RibbitCZSynth extends RibbitSynth {
             // doubled against itself, or both. Everything but "1" costs a
             // second render pass per note.
             //
-            // Declared without `choices` — and so without ghost-text
-            // completion — for the reason tapepad's `voices` and `bits` are:
-            // the console coerces anything numeric-looking to a Number before
-            // it reaches applyOptions, whose choices test is a strict
-            // includes(), so a declared "1" can never match a typed 1. Same
-            // story for `octave` below. Normalizing through String() here is
-            // what lets both forms arrive.
+            // The set() still normalizes through String() even though
+            // `choices` now validates: the console coerces "1" to a Number on
+            // the way in (applyOptions compares stringified — see there), and
+            // a session file or a host calling set() directly can pass either
+            // form. This is what makes both arrive as the same string.
             lines: {
                 get: () => this.lines,
                 set: (value) => {
@@ -393,6 +391,7 @@ export class RibbitCZSynth extends RibbitSynth {
                     }
                     this.lines = wanted;
                 },
+                choices: LINE_SELECTS,
             },
             // Ring multiplies the two lines instead of summing them; noise
             // jitters the second line's phase into something inharmonic. Both
@@ -412,6 +411,7 @@ export class RibbitCZSynth extends RibbitSynth {
                     }
                     this.octave = wanted;
                 },
+                choices: OCTAVES,
             },
         };
 

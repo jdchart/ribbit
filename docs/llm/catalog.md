@@ -234,7 +234,7 @@ preset never has to reach in and rewrite them.
 
 ---
 
-## Processors (7)
+## Processors (9)
 
 An effect in a channel's insert chain (`/<channel> add_processor=<type>`).
 Addressed by its own name. No per-event trigger.
@@ -294,6 +294,47 @@ weaker EQ.
 - **params** — `tone` [-1..1] (±12dB, fixed), `pivot` [100..8000] Hz
 - **options** — none
 
+### `svf` — `src/processors/svf.js`
+A state-variable filter: one cutoff and one resonance, read out as a lowpass,
+highpass, bandpass or notch. The sound-design filter (`tilt` is the mix one) —
+this is what you sweep with an LFO or close over eight bars. Both params are
+real `AudioParam`s on a single `BiquadFilterNode`, so they ramp, defer and take
+a patch natively with nothing to fan out.
+
+- **params** — `cutoff` [20..18000] Hz, `resonance` [0.1..30] (Q),
+  `mix` [0..1] (a true crossfade — a filter's job is to remove something, and
+  a dry path at unity would let it through; `mix=0.5` is parallel filtering)
+- **options** — `mode` (lowpass, highpass, bandpass, notch)
+- **note** — one node with its `type` switched, not four in parallel with a
+  morph between them. A continuous morph is the obvious extension and would
+  cost four biquads per channel for a control almost nobody sweeps; `mode`
+  still schedules on a boundary (`/filt mode=highpass at=cycle`) like any
+  option. Resonance near the top has real gain at cutoff and is the fastest
+  way to overload a channel.
+
+### `comb` — `src/processors/comb.js`
+A comb filter: the signal summed with a very short delayed copy of itself —
+peaks and notches at multiples of `1/time`. Two shapes, and they sound
+different: **feedforward** (`y = x + a·x[n-d]`, one copy, notches — the body of
+a flanger, so patch an LFO into `time`) and **feedback** (`y = x + a·y[n-d]`,
+recirculating, peaks, and it rings with a pitch of its own). Both are built and
+left running; `mode` picks which reaches the wet gain.
+
+- **params** — `time` [0.0002..0.05] s (20Hz–5kHz as a comb frequency),
+  `feedback` [-0.95..0.95] (**bipolar** — a negative coefficient inverts the
+  copy and puts every peak where a notch was), `tone` [200..18000] Hz (a
+  lowpass on the delayed copy; inside the loop in feedback mode, so each pass
+  is darker than the last), `mix` [0..1]
+- **options** — `mode` (feedback, feedforward)
+- **also** — `describeState()` prints the comb frequency and the feedback floor
+- **note** — **the feedback branch can't resonate above ~344Hz** (48kHz:
+  ~375Hz). A Web Audio cycle must contain a `DelayNode` and the spec forces one
+  to at least a render quantum — the same wall `karplus` hit and answered by
+  rendering into a buffer, which a live insert can't do. The feedforward branch
+  is in no loop and combs the whole range. A `time` below the floor silently
+  resonates at the floor instead of erroring, which is why `describeState()`
+  says so.
+
 ### `limiter` — `src/processors/limiter.js`
 A loudness ceiling: `boost` into a fast, high-ratio compressor. Honestly a
 fast compressor, not a lookahead brickwall (Web Audio has no lookahead), so
@@ -328,7 +369,7 @@ the same control on two compressors rather than two code paths.
 
 ---
 
-## Modulators (7)
+## Modulators (8)
 
 A control source, never in a channel's chain — it exists to be patched
 somewhere. Two distinct shapes:
@@ -451,6 +492,96 @@ want `spread=3`, four are happy at 1.
   every chord boundary underneath the music rather than slowing the
   progression down.
 
+### `randomgestures` — `src/modulators/randomgestures.js`
+Roams the live session and glides random parameters to new values — a seeded,
+self-playing hand on the controls. **The only modulator that isn't patched into
+anything**: it holds the engine (handed to it at construction, the way a synth
+is handed the harmony context), enumerates what is currently modulatable, and
+ramps real `AudioParam`s directly. A patch cable gives you one destination
+chosen by hand; this gives you the whole patch, drifting.
+
+What it may touch is not a new concept: exactly the set the bulk
+`/<object> random` draws from — a param with a declared range whose `.r` flag
+is on (`RibbitParam.canRandomize`). So a channel's fader is out by default and
+`/lead cutoff.r=false` takes one param off the table for both at once. There is
+deliberately no second opt-out list.
+
+- **params** — `gesture_beats` [0.25..64] (interval), `glide` [0..64] beats
+  (how long one gesture takes — longer than the interval means several params
+  in motion at once, which is what makes it sound like a performer),
+  `depth` [0..1] (how far one gesture may move a param, as a fraction of that
+  param's own range, either side of where it currently sits — a bounded random
+  *walk*, not unrelated jumps), `probability` [0..1] (rolled per due gesture)
+- **options** — `seed` (or `random`), `scope` (all, tracks, buses, processors,
+  modulators, master), `targets` (comma-separated object names, overriding
+  `scope`; **a group name expands to its members**, which is the intended way
+  to aim it), `params` (comma-separated param names, e.g. `params=cutoff`)
+- **also** — `describeState()` prints how many params are in range and the last
+  gesture; sets `lastEventTime`, so the mixer strip flashes per gesture
+- **note** — it rides a **new clock hook, `onSchedule(fromBeat, toBeat,
+  secondsPerBeat, clock)`** (clock.js), the third thing a unit can do with a
+  scheduling window after playing events and generating notes. Seeded and
+  repeatable, and `/stop /start` replays the take from the top — with the
+  caveat that a gesture is a choice *among what currently exists*, so adding a
+  track mid-take renumbers everything after it.
+
+---
+
+## Groups
+
+Not a type — a name that stands for several other names (`src/group.js`,
+`/add_group name=drums members=kick,snare,hats`). Every key on the line that
+isn't the group's own is forwarded verbatim to each member's own command
+handler, so `/drums gain=0 4b at=cycle` fades all of them on the same boundary
+and `/drums random` rolls all of them. `groupCommand` knows nothing about gain
+or synths, which is why groups work with commands written before they existed.
+
+**Not a bus.** A bus sums signal, and routing four tracks into one changes what
+you hear (one fader, one insert chain, one pan). A group changes nothing about
+the graph. The two compose: a group of the tracks that already send to a drum
+bus is the normal arrangement.
+
+Members are **names**, resolved fresh per command — so a group can be written
+before its members exist, survives `/recall` tearing a member down and
+rebuilding it, and marks a member that no longer resolves as `(missing)` rather
+than quietly shrinking. Groups can nest (cycles are entered once and stopped).
+`remove_self` deletes the group and leaves its members alone.
+
+## Mute and solo
+
+Every channel (track, bus, master) has `mute` / `unmute` and — master aside —
+`solo` / `unsolo`, deferrable like any other command. Mute is its own node
+between the panner and the fader, **not** "set gain to 0": the fader keeps its
+position and its saved value, an in-flight gain ramp keeps running underneath,
+and unmuting returns exactly where the channel was. Being upstream of the fader
+takes the sends with it, so a muted track feeds a reverb bus nothing.
+
+Solo is a whole-session state (`Ribbit.updateSolo`), not a per-channel flag: a
+channel stays audible if it can reach a soloed channel, or be reached from one,
+through sends. Solo a track and its reverb bus keeps working; solo the bus and
+the tracks feeding it keep playing. Both round-trip in a session file (written
+only when true) and both show in `/tracks` and on the mixer's M/S buttons.
+
+## Recording
+
+`engine.recorder` (`src/recorder.js`) — not a registered type, so it has no
+params or options; three plain settings instead, carried by `/record` and
+`/recording`:
+
+- `mode` — `stereo` (tap master alone, one `.wav`) or `multitrack` (tap every
+  track, then every bus, then master; one `.wav` each, downloaded as a `.zip`).
+  Can't change mid-take.
+- `bits` — `32` (IEEE float, lossless, survives going over 0dBFS) or `16`
+  (PCM, half the size, clamps).
+- `max_minutes` — safety stop, default 5. A take is raw float audio in memory.
+
+`/record` and `/stop_record` both take `at=`, which is the point of typing them
+rather than clicking. Taps read each channel's `output`, so they are
+post-fader/pan/mute and a muted channel records silence. Capture is an
+`AudioWorkletProcessor` compiled from an inline blob URL — the engine's only
+worklet, and the file to copy if a type ever needs one (e.g. a sample-accurate
+`getModulated`). A take is deliberately **not** in a session snapshot.
+
 ---
 
 ## Which one to copy
@@ -475,8 +606,9 @@ want `spread=3`, four are happy at 1.
 | distorts phase rather than amplitude, or needs a moving nonlinearity | `czsynth` |
 | models a specific piece of hardware from its sysex format | `czsynth` |
 | is a straightforward effect | `reverb` |
-| has a param spanning several nodes | `delay` (`onSet`) |
-| needs a param that *ramps* across several nodes | `tilt`, or `RibbitProcessor.createCrossfade` |
+| is a filter, or anything with one live `AudioParam` per control | `svf` (the smallest processor with real params) |
+| needs a param that *ramps* across several nodes | `tilt`, `delay`, `comb`, or `RibbitProcessor.createCrossfade` |
+| has a feedback loop, or two structures switched between | `comb` |
 | acts on the signal rather than adding to it (needs a real dry/wet crossfade) | `compressor` |
 | rebuilds a curve/table from a discrete setting | `saturator` (`character`), `reverb` |
 | combines existing processors rather than adding DSP | `goodenizer` (the only composite) |
@@ -488,6 +620,7 @@ want `spread=3`, four are happy at 1.
 | generates sustained/overlapping notes rather than hits | `chorale` |
 | needs chords, modes or voice leading | `chorale` |
 | must be exactly reproducible without a seed (derived purely from the beat) | `chorale` |
+| modulates the session rather than one destination (needs no patch) | `randomgestures` (also the only user of the clock's `onSchedule` hook, and of the injected `engine`) |
 | reads a host-served library (manifest) | `percsampler`, `granular` (both via `src/samples.js`), `patternvariator` (`src/pattern.js`) |
 | needs a param with no natural `AudioParam` | any of the last three — all use `RibbitParamSources` (`src/param.js`) |
 

@@ -280,6 +280,22 @@ export class RibbitClock {
                         if (delivered) unit.lastEventTime = time;
                     }
                 }
+
+                // The third thing a unit can do with a scheduling window,
+                // after playing its own events and generating notes for
+                // somebody else's: act on the session directly.
+                // RibbitRandomGestures ramps other objects' params, which is
+                // neither an event nor a signal and so has nowhere in either
+                // of the two mechanisms above to live.
+                //
+                // Given the same absolute (non-looping) beat range
+                // generateEvents gets, plus this clock, so a unit can turn a
+                // beat into the precise AudioContext time to schedule at —
+                // the whole point of a lookahead window, and the difference
+                // between a gesture landing on the beat and landing whenever
+                // the timer happened to fire. Optional and duck-typed, like
+                // trigger()/generateEvents()/onCycle().
+                unit.onSchedule?.(loopBeatStart + rangeStart, loopBeatStart + rangeEnd, this.secondsPerBeat, this);
             }
         }
     };

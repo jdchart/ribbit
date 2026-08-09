@@ -8,6 +8,8 @@ import { RibbitSaturator } from "./processors/saturator.js";
 import { RibbitTilt } from "./processors/tilt.js";
 import { RibbitLimiter } from "./processors/limiter.js";
 import { RibbitGoodenizer } from "./processors/goodenizer.js";
+import { RibbitSVF } from "./processors/svf.js";
+import { RibbitComb } from "./processors/comb.js";
 import { RibbitOscSynth } from "./synths/oscsynth.js";
 import { RibbitSampler } from "./synths/sampler.js";
 import { RibbitPercSampler } from "./synths/percsampler.js";
@@ -23,7 +25,10 @@ import { RibbitMarkovPercs } from "./modulators/markovpercs.js";
 import { RibbitEuclidPercs } from "./modulators/euclidpercs.js";
 import { RibbitPatternVariator } from "./modulators/patternvariator.js";
 import { RibbitChorale } from "./modulators/chorale.js";
+import { RibbitRandomGestures } from "./modulators/randomgestures.js";
 import { RibbitPatch, RibbitEventPatch } from "./patch.js";
+import { RibbitGroup } from "./group.js";
+import { RibbitRecorder } from "./recorder.js";
 import { createHarmonyContext } from "./harmony.js";
 
 // String-keyed registries that map a command/UI-facing type name to a class.
@@ -38,6 +43,8 @@ const PROCESSOR_TYPES = {
     compressor: RibbitCompressor,
     saturator: RibbitSaturator,
     tilt: RibbitTilt,
+    svf: RibbitSVF,
+    comb: RibbitComb,
     limiter: RibbitLimiter,
     // A composite of the four above rather than a sixth implementation —
     // see processors/goodenizer.js.
@@ -63,6 +70,7 @@ const MODULATOR_TYPES = {
     euclidpercs: RibbitEuclidPercs,
     patternvariator: RibbitPatternVariator,
     chorale: RibbitChorale,
+    randomgestures: RibbitRandomGestures,
 };
 
 // Every name the console router dispatches before it ever looks at objects:
@@ -74,6 +82,8 @@ const MODULATOR_TYPES = {
 export const RESERVED_NAMES = new Set([
     "start", "stop", "add_track", "tracks", "add_bus", "buses", "clock",
     "harmony", "add_modulator", "modulators", "patch", "unpatch", "patches",
+    "add_group", "groups",
+    "record", "stop_record", "save_record", "clear_record", "recording",
     "save", "recall", "remove_state", "states",
     "save_session", "save_json", "load_session", "load_json",
     "master", "help",
@@ -101,17 +111,31 @@ export class Ribbit {
         this.audioContext.suspend();
         this.running = false;
 
-        this.master = new RibbitChannel(this.audioContext, { name: "master" });
-        this.master.connect(this.audioContext.destination, "speakers");
-
+        // Declared before master, not after: master's own connect() to the
+        // speakers goes through addSend, which re-derives the session's solo
+        // state (see RibbitChannel.addSend / updateSolo) and so reads both of
+        // these while this constructor is still running.
         this.tracks = [];
         this.buses = [];
+
+        this.master = new RibbitChannel(this.audioContext, { name: "master", engine: this });
+        this.master.connect(this.audioContext.destination, "speakers");
+
         this.processors = [];
         this._processorIdCounter = 0;
 
         this.modulators = [];
         this.patches = [];
         this._patchIdCounter = 0;
+
+        // Named sets of other objects, addressed by name like anything else
+        // but holding no audio at all — see group.js and commands.js's
+        // groupCommand. They live in the same one namespace as tracks/buses/
+        // processors/modulators (so _allNames covers them), but deliberately
+        // NOT in _resolveObject: a group has no input or output, so naming
+        // one as a send destination or a patch endpoint has to fail rather
+        // than half-work.
+        this.groups = [];
 
         // Named full-session snapshots captured by /save and applied by
         // /recall (see session.js) — persisted as part of the session JSON
@@ -126,6 +150,12 @@ export class Ribbit {
 
         this.clock = new RibbitClock(this.audioContext);
         this.clock.addUnit(this.master);
+
+        // Capture of this session's output to downloadable WAV (see
+        // recorder.js and commands.js's /record). Deliberately not a clock
+        // unit and not part of a session snapshot: a take is the *output* of
+        // a performance, not part of its description.
+        this.recorder = new RibbitRecorder(this);
 
         // Live setTimeout ids from automation.js's scheduleAt — deferred work
         // that can't ride native AudioParam scheduling (/recall's structural
@@ -222,6 +252,10 @@ export class Ribbit {
         for (const track of this.tracks) track.source?.dispose?.();
         for (const modulator of this.modulators) modulator.dispose?.();
         for (const processor of this.processors) processor.dispose?.();
+        // Fourth thing outliving this object: a stopped-but-unflushed
+        // recorder holds its own timers, and an unsaved take holds hundreds
+        // of megabytes of audio.
+        this.recorder.dispose();
         return this.audioContext.close();
     };
 
@@ -236,6 +270,7 @@ export class Ribbit {
             ...this.buses.map((b) => b.name),
             ...this.processors.map((p) => p.name),
             ...this.modulators.map((m) => m.name),
+            ...this.groups.map((g) => g.name),
         ]);
     };
 
@@ -287,7 +322,7 @@ export class Ribbit {
         // are track-level options, not meant to reach the synth's constructor.
         const { name: _trackName, synth: synthType, out, ...synthOptions } = options;
         const source = this.createSynth(synthType ?? "oscsynth", synthOptions);
-        const track = new RibbitTrack(this.audioContext, source, { name });
+        const track = new RibbitTrack(this.audioContext, source, { name, engine: this });
 
         const destName = out ?? "master";
         const destObject = this._resolveObject(destName);
@@ -309,7 +344,7 @@ export class Ribbit {
     // channelCommand's out=/add_send=/remove_send=.
     createBus(options = {}) {
         const name = this._uniqueName(options.name ?? "bus");
-        const bus = new RibbitChannel(this.audioContext, { name });
+        const bus = new RibbitChannel(this.audioContext, { name, engine: this });
 
         const destName = options.out ?? "master";
         const destObject = this._resolveObject(destName);
@@ -411,6 +446,9 @@ export class Ribbit {
         this.tracks.splice(index, 1);
         this.clock.removeUnit(track.source);
         this.clock.removeUnit(track);
+        // Removing the only soloed channel has to let everything else back
+        // in, the same way un-soloing it would have.
+        this.updateSolo();
 
         return true;
     };
@@ -436,6 +474,7 @@ export class Ribbit {
 
         this.buses.splice(index, 1);
         this.clock.removeUnit(bus);
+        this.updateSolo();
 
         return true;
     };
@@ -476,7 +515,12 @@ export class Ribbit {
         }
 
         const name = this._uniqueName(options.name ?? type);
-        const modulator = new ModulatorClass(this.audioContext, { ...options, name });
+        // `engine` rides along the same way `harmony` does for a synth (see
+        // createSynth): a modulator that modulates *the session* rather than
+        // one patched param — randomgestures — has no other way to find out
+        // what exists to modulate. Injected last so a stray `engine=` typed
+        // at the console can't shadow it. Every other modulator ignores it.
+        const modulator = new ModulatorClass(this.audioContext, { ...options, name, engine: this });
         // See createSynth's `synth.type` for why this is recorded here rather
         // than reverse-derived from the registry (see session.js).
         modulator.type = type;
@@ -506,6 +550,81 @@ export class Ribbit {
         this.clock.removeUnit(modulator);
 
         return true;
+    };
+
+    // Creates a named group (see group.js). Members are names, not objects,
+    // and are deliberately not validated here: a session file lists its
+    // groups last but a group may name anything, and the console validates
+    // before it defers (see commands.js's add_group). A name that resolves to
+    // nothing is simply skipped, and reported by the group's own summary.
+    createGroup(options = {}) {
+        const name = this._uniqueName(options.name ?? "group");
+        const group = new RibbitGroup({ name, members: options.members });
+        this.groups.push(group);
+        return group;
+    };
+
+    removeGroup(group) {
+        const index = this.groups.indexOf(group);
+        if (index === -1) return false;
+        this.groups.splice(index, 1);
+        return true;
+    };
+
+    _resolveGroup(name) {
+        return this.groups.find((g) => g.name === name);
+    };
+
+    // Recomputes which channels solo is currently silencing, and applies it.
+    //
+    // Solo is a property of the whole session rather than of one channel: the
+    // channels you soloed are what you hear, and everything else drops out —
+    // so any change to any channel's `soloed` flag has to re-derive the state
+    // of every other one. That's this function, called by
+    // RibbitChannel.setSoloed (which knows its own flag changed but nothing
+    // about the rest) via the back-reference set below.
+    //
+    // "Everything else" is not quite literal, and the exception is what makes
+    // solo usable on a session with buses: a channel stays audible if it can
+    // reach a soloed channel, or be reached from one, through sends. Solo a
+    // track and its reverb bus keeps working (downstream); solo the reverb
+    // bus and the tracks feeding it keep playing (upstream). Without the walk,
+    // soloing one track would mute the bus carrying half its sound.
+    updateSolo() {
+        const channels = [...this.tracks, ...this.buses];
+        const soloed = channels.filter((channel) => channel.soloed);
+
+        if (soloed.length === 0) {
+            for (const channel of channels) channel._setSoloSilenced(false);
+            return;
+        }
+
+        // Grow the audible set until it stops growing: a member's send
+        // destinations join it (downstream), as does anything sending into a
+        // member (upstream). Master is never in `channels` and never
+        // silenced — it's where everything audible has to arrive.
+        const audible = new Set(soloed);
+        let grew = true;
+        while (grew) {
+            grew = false;
+            for (const channel of channels) {
+                if (audible.has(channel)) {
+                    for (const send of channel.sends) {
+                        if (channels.includes(send.destination) && !audible.has(send.destination)) {
+                            audible.add(send.destination);
+                            grew = true;
+                        }
+                    }
+                    continue;
+                }
+                if (channel.sends.some((send) => audible.has(send.destination))) {
+                    audible.add(channel);
+                    grew = true;
+                }
+            }
+        }
+
+        for (const channel of channels) channel._setSoloSilenced(!audible.has(channel));
     };
 
     // Resolves a bare name against every addressable object — the same

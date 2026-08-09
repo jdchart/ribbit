@@ -21,8 +21,11 @@ SessionPage.svelte                      owns the Ribbit instance + executeComman
 │                                        owns command history (↑/↓) and exposes insertAtCursor(text)
 └── Mixer.svelte  /  CollapsedRail.svelte    (toggled by a collapse arrow)
     ├── Transport.svelte           engine on/off, clock LED, beat/bpm readout,
-    │                               Save JSON/Load JSON buttons (run /save_json,/load_json
-    │                               via the same onRunCommand path CodeEditor's own submit uses)
+    │   │                           Save JSON/Load JSON buttons (run /save_json,/load_json
+    │   │                           via the same onRunCommand path CodeEditor's own submit uses)
+    │   └── Recorder.svelte        REC, take readout, ST/MT mode toggle, Save/discard —
+    │                               runs /record,/stop_record,/recording mode=,/save_record,
+    │                               /clear_record through that same path
     ├── MixerSection.svelte        one per titled panel (Tracks/Buses/Master/Modulators) —
     │                               collapse/resize chrome only; renders whatever's passed as children
     ├── MixerChannel.svelte        one per track, one per bus, plus one for master
@@ -177,7 +180,17 @@ it yet would "complete" to whichever candidate happens to be listed first
 before typing anything further, silently create *that* instead of whatever
 was actually intended — the same guard the `/name`-token and bare-key
 branches already had (an empty partial there also returns no suggestion),
-just missing from the value branch until it was added. See
+just missing from the value branch until it was added.
+
+A second guard covers the same hazard from the other direction: **neither the
+`/name` token nor a value completes past something that already matches a
+candidate exactly.** Because the console accepts *and submits* ghost text on
+Enter, completing `/record` to `/recording` would run a different command
+entirely — and `/record` really is a strict prefix of `/recording`, so without
+this the recording feature's main command would be untypeable. The same guard
+is what makes a track named `kick` addressable alongside one named `kick2`.
+A *key* deliberately still completes when it matches exactly (`gain` →
+`gain=`), because that's the same key and is what was wanted. See
 [source-overview.md](source-overview.md#commandsjs) for the full breakdown
 of `addressableNames`/`resolveKeywordsFor`/`resolveValueCandidates`/
 `pickBestMatch`, and
@@ -263,10 +276,30 @@ Ribbit
 ### Signal chain (per `RibbitChannel` — master, a track, or a bus)
 
 ```
-input ──▶ [processors[0].input → .output] ──▶ [processors[1] ...] ──▶ panner ──▶ gainNode ──┬──▶ sends[0]: sendGain ──▶ destination0.input
-                                                                                              ├──▶ sends[1]: sendGain ──▶ destination1.input
-                                                                                              └──▶ ...
+input ──▶ [processors[0].input → .output] ──▶ [processors[1] ...] ──▶ panner ──▶ muteGain ──▶ gainNode ──┬──▶ sends[0]: sendGain ──▶ destination0.input
+                                                                                                          ├──▶ sends[1]: sendGain ──▶ destination1.input
+                                                                                                          └──▶ ...
 ```
+
+`muteGain` is why **mute is a node and not a gain value**. Muting by writing 0
+to the fader would destroy the position the user set, fight an in-flight
+`gain` ramp, and have to remember what to restore; a separate node upstream of
+`gainNode` leaves all of that alone and takes the sends with it (which is what
+mute means on a desk — a muted track feeds a reverb bus nothing). `setMuted`
+and `setSoloed` only set a flag and call `_applyAudible()`, the single place
+that decides `audible = !muted && !_soloSilenced` and ramps `muteGain` over
+10ms so the transition doesn't click.
+
+**Solo can't be decided locally**, which is why it isn't just a second flag on
+the channel. What you hear depends on every *other* channel's solo state, so
+`setSoloed` calls `Ribbit.updateSolo()` (reached through the `engine`
+back-reference every channel is constructed with). That grows an audible set
+from the soloed channels outward along the **sends graph in both directions**
+until it stops growing, and silences the rest via `_setSoloSilenced`. The walk
+is the whole feature: without it, soloing a track would silence the bus
+carrying half of its sound, and soloing a bus would silence everything feeding
+it. Master is never in the pool and refuses `solo`. The sends graph can change
+under a live solo, so `addSend`/`removeSend` re-derive it too.
 
 `_rewireChain()` rebuilds the `input → panner → gainNode` portion every time a
 processor is added/removed/bypassed, skipping any processor with `active ===
@@ -329,15 +362,20 @@ delegate onto `this.params.wet.audioParam`, not a second implementation.
 
 **`onSet` has a known ceiling, and there's a second technique above it.**
 `onSet` only overrides the *instant-set* path, so a param wired that way ramps
-only its primary node and strands the rest — the standing `RibbitDelay`
-`time`/`feedback` limitation. Where a value must drive several nodes *through
+only its primary node and strands the rest. **No shipped param uses it any
+more** — `RibbitDelay`'s `time`/`feedback` were the last holdouts. Where a
+value must drive several nodes *through
 ramps too*, the param is instead a `ConstantSourceNode`'s `.offset` (created by
 `RibbitParamSources`) connected into every target `AudioParam`, optionally via
 scaling or inverting gains. `AudioParam` connections *sum* onto the intrinsic
 value, so one param moves all of them identically under sets, ramps, deferred
 `at=` and `/patch`. `RibbitProcessor.createCrossfade` uses this for dry/wet
-(`dryGain` intrinsic 1 minus mix, `wetGain` intrinsic 0 plus mix) and
-`RibbitTilt` for its two shelf gains. The cost is an owned running node, which
+(`dryGain` intrinsic 1 minus mix, `wetGain` intrinsic 0 plus mix),
+`RibbitTilt` for its two shelf gains, `RibbitDelay` for both delay lines (with
+a *second* constant summed onto the R line for `stereoOffset` — the reason
+this needed a summed offset rather than a scaler, and why it was converted
+last), and `RibbitComb` for the delay and feedback gain of both its branches.
+The cost is an owned running node, which
 is why `dispose()` now exists on `RibbitProcessor` too.
 
 **Dry/wet is a design decision with two correct answers.** `reverb`/`delay`
@@ -565,7 +603,17 @@ cursor is the one current example — must reset it there, or a `/stop`
 `/start` would strand it at the pre-stop beat number, silently generating
 nothing until the clock caught back up.
 
-A fourth hook, `unit.onCycle?.(cycleIndex)`, fires from `_scheduleRange` the
+A fourth hook, `unit.onSchedule?.(fromBeat, toBeat, secondsPerBeat, clock)`,
+fires in the same per-unit loop as `generateEvents` and gets the same absolute
+beat range — for a unit that acts on the *session* rather than producing
+events. `RibbitRandomGestures` is the only consumer: it ramps other objects'
+`AudioParam`s directly, which is neither an event nor a signal and so has
+nowhere in either of the other two mechanisms to live. It receives the clock
+itself so it can turn a beat into the precise `AudioContext` time to schedule
+at, which is the whole point of scheduling inside a lookahead window rather
+than acting when the timer fires.
+
+A fifth hook, `unit.onCycle?.(cycleIndex)`, fires from `_scheduleRange` the
 first time a given loop index is scheduled — the seam for "change something
 every N cycles". It deliberately fires **a lookahead window early**, in the
 same pass that schedules that cycle's first events, because a unit that
@@ -729,6 +777,19 @@ deliberately does none of this — it's a hard rebuild, since loading an
 entirely different session from disk is a cold-start operation with no
 "previous state" worth crossfading from.
 
+`loadSession` does carry one thing `applySnapshot` doesn't: a **rename map**.
+Everything in a session file that refers to another object does so by name
+(a send's destination, a patch's two endpoints, a group's members), but
+`_uniqueName` will silently de-duplicate a name that collides — with a
+duplicate in the same file, or with a reserved command name (a track called
+`states`). Without the map, the first such reference resolved to nothing and
+the load stopped half-applied, which is how a session with one badly-named
+track used to lose all of its modulators and patches. Every create call
+records the name it actually got, later references are rewritten through it,
+and a `notify()` says so. The one thing not rewritten is a `/save`d state
+inside the same file — those are whole nested snapshots reconciled by name at
+`/recall` time, so the honest fix there is renaming the object in the file.
+
 ## Command router as a third view
 
 `createCommandRouter(nllc)` closes over the live `Ribbit` instance and returns
@@ -736,12 +797,26 @@ entirely different session from disk is a cold-start operation with no
 [Console suggestions](#console-suggestions-ghost-text-completion) above for
 `suggest`; neither function maintains any state of its own beyond that
 closure. Dispatch is by name lookup against `nllc.tracks`/`nllc.buses`/
-`nllc.processors`/`nllc.modulators`/`master` at call time, so newly created
-tracks/buses/processors/modulators are addressable immediately with no
+`nllc.processors`/`nllc.modulators`/`nllc.groups`/`master` at call time, so
+newly created objects are addressable immediately with no
 registration step beyond what `Ribbit.createTrack`/`createBus`/`createProcessor`/
-`createModulator` already do. A bus dispatches through the exact same
-`channelCommand` a track does — see [adding-commands.md](adding-commands.md)
-for extending it.
+`createModulator`/`createGroup` already do. A bus dispatches through the exact
+same `channelCommand` a track does — see
+[adding-commands.md](adding-commands.md) for extending it.
+
+That lookup is factored out as `objectHandler(name)` rather than inlined in
+`executeOne`, because **a group needs it**. A group (`group.js`) is a name
+standing for a list of other names; `groupCommand` consumes only its own five
+keys and hands everything else — `at=` included — to each member's handler
+verbatim. That is the whole reason it works with commands written before it
+existed: it has no per-command knowledge to keep in sync. The alternative,
+re-entering `executeOne` with a rebuilt command string, would mean serializing
+parsed params back to text and re-parsing them. Members are resolved *per
+command*, not held as references, so a group can name something that doesn't
+exist yet, survives a `/recall` that tears a member down and rebuilds it, and
+reports one that's gone as `(missing)`. A group can name another group; the
+set of groups already entered on the line is threaded through the handler's
+second argument so a cycle is entered once and stops.
 
 Both one-liners also append an optional duck-typed `describeState()` — for
 state that is neither a param nor an option, like `markovpercs`' generated
@@ -766,7 +841,7 @@ not information.
 
 Dispatch order also means the `/name` namespace is genuinely flat:
 `ribbit.js`'s `_uniqueName` de-duplicates a new object's name against every
-existing object of *every* kind plus `RESERVED_NAMES` (every top-level
+existing object of *every* kind — groups included — plus `RESERVED_NAMES` (every top-level
 command name and `master`, exported from `ribbit.js`), so nothing can be
 created already shadowed by an earlier lookup. `createCommandRouter`
 sanity-checks its own command keys against `RESERVED_NAMES` when built

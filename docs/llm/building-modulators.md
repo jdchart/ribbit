@@ -103,7 +103,23 @@ Several generators may feed the same track (only an exact duplicate
 source→dest patch is rejected), which is how a fixed backbone plus a
 decorating layer is built.
 
-Five generators exist, and they differ in *what decides whether a note
+**A modulator need not publish anything at all.** The third shape (one
+instance: `modulators/randomgestures.js`) neither outputs a signal nor
+generates events — it acts on the session directly. Two things make that
+possible, and both are the pattern to copy: `Ribbit.createModulator` injects
+`engine` into every modulator's constructor options (exactly as `createSynth`
+injects `harmony`), so it can enumerate what exists; and `RibbitClock` calls
+the duck-typed `onSchedule(fromBeat, toBeat, secondsPerBeat, clock)` on every
+unit that has one, with the same absolute beat range `generateEvents` gets plus
+the clock itself, so scheduled work lands on a beat rather than whenever the
+timer fired. Such a modulator is patched nowhere; `paramObjectHelp` detects it
+by `onSchedule` and says so instead of offering a patch line. If yours picks
+params to touch, filter by `param.canRandomize` (`src/param.js`) rather than
+inventing an opt-out list — that's the same set bulk `random` uses, so
+`<param>.r=false` already means "leave this alone" and round-trips in a
+session.
+
+Five *note* generators exist, and they differ in *what decides whether a note
 happens* — worth knowing before adding a sixth, since the useful axis is
 usually a new answer to that question rather than a new sound:
 `randomnotes` rolls fresh dice per slot (never repeats), `markovpercs` looks

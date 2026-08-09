@@ -66,6 +66,12 @@ const MAX_VOICES = 5;
 const MIN_BITS = 3;
 const MAX_BITS = 16;
 
+// The whole numbers from low to high, as the strings a `choices` list holds —
+// so an integer-valued option declares its range once instead of writing the
+// same bounds out twice (see voices/bits below).
+const RANGE_CHOICES = (low, high) =>
+    Array.from({ length: high - low + 1 }, (_, i) => String(low + i));
+
 // One loop of tape drift: a sum of sines at *whole* cycle counts over the
 // buffer, each at a random phase.
 //
@@ -375,6 +381,11 @@ export class RibbitTapePad extends RibbitSynth {
                     }
                     this.voices = count;
                 },
+                // A short integer run, so it's worth listing: `choices` buys
+                // ghost-text completion and a validation message before a
+                // deferred at= ever fires. The set() above still validates —
+                // it's the path a session file and a direct host call take.
+                choices: RANGE_CHOICES(1, MAX_VOICES),
             },
 
             // Quantization depth of the crush stage. An option rather than a
@@ -392,6 +403,7 @@ export class RibbitTapePad extends RibbitSynth {
                     this.bits = count;
                     this._crushShaper.curve = buildCrushCurve(count);
                 },
+                choices: RANGE_CHOICES(MIN_BITS, MAX_BITS),
             },
         };
 

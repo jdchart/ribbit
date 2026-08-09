@@ -42,11 +42,13 @@ own params, a modulator's own params, a patch's `depth`. Wraps a single raw
   `.canRandomize` is the two conditions together. Channel `gain` is the only
   thing in the engine that ships with it off.
 - optional `onSet` — overrides the instant-set path for a param that has to
-  fan a single value out across more than one node (`RibbitDelay`'s `time`
-  writes both `delayL.delayTime` and `delayR.delayTime`, the latter offset for
-  stereo width). Ramping/deferred `at=` scheduling still only animates the
-  "primary" `.audioParam` directly — `onSet` only affects the plain
-  instant-set case.
+  fan a single value out across more than one node. Ramping/deferred `at=`
+  scheduling still only animates the "primary" `.audioParam` directly, so the
+  other nodes are stranded for the length of every glide. **Nothing in the
+  engine uses it any more** (`RibbitDelay`'s `time`/`feedback` were the last);
+  fan out with a `ConstantSourceNode` summed into every target instead, as
+  `RibbitTilt`/`RibbitDelay`/`RibbitComb`/`createCrossfade` all do. Kept because
+  it's the right shape for a target that genuinely isn't an `AudioParam`.
 
 **`RibbitParamSources`** lives here too — the factory for a param that wants
 all of the above but has no `AudioParam` in the audio graph to hang off
@@ -334,7 +336,15 @@ just `RibbitRandomNotes`' candidate-grid cursor) must reset it there —
 otherwise a `/stop` `/start` leaves that state stranded at a beat number the
 clock won't reach again for a long time.
 
-A third optional hook, `unit.onCycle?.(cycleIndex)`, fires inside
+A third optional hook, `unit.onSchedule?.(fromBeat, toBeat, secondsPerBeat,
+clock)`, fires in the same per-unit loop as `generateEvents` and gets the same
+absolute beat range, plus the clock itself. It's for a unit that acts on the
+*session* rather than producing events — `RibbitRandomGestures` is the only
+consumer, and needs the clock to turn a beat into the precise `AudioContext`
+time to schedule a ramp at, which is the difference between a gesture landing
+on the beat and landing whenever the timer fired.
+
+A fourth optional hook, `unit.onCycle?.(cycleIndex)`, fires inside
 `_scheduleRange` the first time a given loop index is scheduled — the seam for
 "change something every N cycles" (a generator re-rolling, a section
 advancing). Two properties matter. It fires **a lookahead window early**, in
@@ -346,7 +356,8 @@ replayed, since regenerating N times for cycles nobody will hear is strictly
 worse than landing on the current one. `_notifiedCycle` tracks the high-water
 mark and resets to `-1` in `start()`, so a restart re-announces cycle 0.
 
-**Nothing currently implements it.** All five generators index `generateEvents`
+**Nothing currently implements `onCycle`.** Every generator indexes
+`generateEvents`
 straight off the absolute step number, which sidesteps needing a boundary
 notification at all, and `RibbitPatternVariator` regenerates only on reseed by
 deliberate design. It's an unused seam rather than dead code — the natural
@@ -356,8 +367,8 @@ consumer is a future every-N-cycles generator.
 
 Base class for anything with a fader, pan, an insert chain, and one or more
 sends: `master`, every `RibbitTrack`, and every bus are one of these. Owns
-`input`/`panner`/`gainNode` nodes, the `processors` array, and the `sends`
-array. `volume`/`pan` getters expose the underlying `AudioParam`s directly (so
+`input`/`panner`/`muteGain`/`gainNode` nodes, the `processors` array, and the
+`sends` array. `volume`/`pan` getters expose the underlying `AudioParam`s directly (so
 they can be automation targets or bound straight into the UI); `output`
 (aliasing `gainNode`, the post-fader signal) lets a channel double as a patch
 source (see `patch.js`) the same way a synth's or processor's own `output`
@@ -365,6 +376,18 @@ can. `params` (`{ gain: RibbitParam, pan: RibbitParam }`, see `param.js`) is the
 console/UI-facing surface `commands.js`'s `applyParams` uses — `gain` wraps
 `gainNode.gain` through the position↔gain taper (`taper.js`), `pan` wraps
 `panner.pan` directly, both clamped (`0..1` / `-1..1`).
+`setMuted(bool)`/`setSoloed(bool)` are the mute/solo surface. Both set a plain
+flag; all the audio happens in `_applyAudible()`, the single place that decides
+`audible = !muted && !_soloSilenced` and ramps `muteGain` (which sits between
+`panner` and `gainNode`) to 1 or 0 over 10ms — short enough to read as instant,
+long enough not to click. Muting is deliberately *not* writing 0 to the fader:
+this way the position, its saved value and any in-flight `gain` ramp are all
+untouched, and because the node is upstream of `gainNode` the sends go quiet
+with it. `setSoloed` additionally calls `engine.updateSolo()` (see `ribbit.js`)
+because solo is a whole-session state no single channel can compute;
+`_setSoloSilenced` is how that result comes back. `addSend`/`removeSend` also
+poke `updateSolo()`, since solo's audible set is derived from the sends graph.
+
 `addProcessor`/`removeProcessor`/`setProcessorActive` all end by calling
 `_rewireChain()`, which is the only place that actually connects/disconnects
 the `input → panner → gainNode` portion of the chain — everything else just
@@ -816,11 +839,13 @@ Stereo ping-pong delay: a `ChannelSplitter`/`ChannelMerger` pair around two
 independent `DelayNode`s, cross-feeding each channel's output into the *other*
 channel's delay line (`delayL → feedbackL → delayR`, and vice versa) rather than
 back into itself, plus a small `stereoOffset` added to the right channel's delay
-time for width. `time`/`feedback` are `RibbitParam`s whose `onSet` fans an
-instant set out across both L/R nodes (`time` also adds `stereoOffset` to the
-R side) — ramping/deferred `at=` scheduling still only animates the L side
-directly, a pre-existing limitation unchanged by the `RibbitParam` consolidation.
-`wet` is a plain single-node `RibbitParam`. Same `get time()`/`get feedback()`/
+time for width. `time`/`feedback` are `RibbitParamSources` params: both delay
+times and both feedback gains start at intrinsic zero and are driven by
+constants summed in, with `stereoOffset` a *second* constant added onto the R
+line only. That offset is why this was the last param converted off `onSet` —
+it needs a summed node rather than a scaler — and the conversion is what makes
+`/delay time=0.75 8b` move both channels together instead of gliding the L side
+while the R side sits still. `wet` is a plain single-node `RibbitParam`. Same `get time()`/`get feedback()`/
 `get wet()` alias pattern as `RibbitReverb`.
 
 ## `processors/compressor.js` — `RibbitCompressor extends RibbitProcessor`
@@ -879,7 +904,55 @@ Both filters' `gain` and `frequency` start at intrinsic zero and are driven
 entirely by two `RibbitParamSources` params connected in — `tone` through a
 `+12` gain into the high shelf and a `-12` gain into the low shelf, `pivot`
 unscaled into both frequencies. This is the same technique as `createCrossfade`
-and for the same reason: `onSet` can't keep a *ramp* moving more than one node.
+(and now `delay` and `comb`) and for the same reason: `onSet` can't keep a
+*ramp* moving more than one node.
+
+## `processors/svf.js` — `RibbitSVF extends RibbitProcessor`
+
+One `BiquadFilterNode` with its `type` switched by a `mode` option (lowpass,
+highpass, bandpass, notch), inside a `createCrossfade` so `mix` is a true
+dry/wet rather than an added wet path — a filter's job is to remove something,
+and a dry path at unity would let it back through. The smallest processor whose
+params are plain single-node `AudioParam`s (`frequency`, `Q`), so `cutoff` and
+`resonance` ramp, defer and take a patch with nothing to fan out; it's the file
+to copy for anything shaped that way.
+
+Four parallel filters with a continuous morph between them would be the more
+modular answer and is the obvious extension — it was skipped because it costs
+four biquads on every channel for a control almost nobody sweeps, while `mode`
+still schedules on a boundary like any other option. `set()` validates against
+`MODES` as well as declaring `choices`, because a session file's options block
+reaches `set()` directly and assigning nonsense to `.type` throws a
+`DOMException` that names nothing useful.
+
+## `processors/comb.js` — `RibbitComb extends RibbitProcessor`
+
+Two comb structures built side by side, one gated into the wet path at a time:
+**feedforward** (`x + a·x[n-d]`, notches, the body of a flanger) and
+**feedback** (`x + a·y[n-d]`, peaks, and it rings). Each is a sum `GainNode`
+fed by the input and by its own delayed copy — the wet tap is that *sum*, never
+the bare delay output, which is what makes the response a comb around unity
+rather than an echo beside the signal. One `time` constant drives both delay
+lines and one `feedback` constant both coefficient gains; `tone` is a lowpass
+on the delayed copy in each branch (inside the loop in feedback mode, so each
+pass is darker and the tail decays like a plucked string). `feedback` is
+bipolar: a negative coefficient inverts the copy and moves every peak onto what
+was a notch.
+
+`mode` ramps the two gates over 20ms rather than switching them, since the
+feedback sum is nowhere near zero when you leave it — but the *constructor*
+writes the gate gains directly, because a processor is usually built while the
+engine is stopped and a suspended context's frozen `currentTime` would leave
+both gates at a `GainNode`'s default 1 (i.e. both branches summing) until the
+transport started.
+
+**The feedback branch can't resonate above `sampleRate/128`** (~344Hz at
+44.1k): a Web Audio cycle must contain a `DelayNode` and the spec floors that
+at one render quantum. `karplus` hit the same wall and answered it by rendering
+into a buffer, which a live insert can't do — hence two modes rather than a
+footnote, and hence `describeState()`, which prints the comb frequency and says
+when `time` is under the floor (where it silently resonates at the floor
+instead of erroring).
 
 ## `processors/limiter.js` — `RibbitLimiter extends RibbitProcessor`
 
@@ -938,7 +1011,9 @@ drive several destinations at different depths. Also has `options` (same
 map as `RibbitSynth`/`RibbitProcessor` — `RibbitLFO.waveform`,
 `RibbitRandomNotes.scale`) and an `automation` array + `addAutomation()`, so
 a modulator's own params can be loop-automated exactly like a processor's
-(`/lfo1 automate=freq ...`).
+(`/lfo1 automate=freq ...`). Every modulator is also handed `engine` by
+`Ribbit.createModulator` (see `ribbit.js`) — ignored by all but
+`randomgestures`, which needs it to enumerate what there is to modulate.
 
 Two things live here that only the *event-generating* subclasses use, and both
 are on the base deliberately:
@@ -1227,6 +1302,107 @@ generator must.
 because the voicing is a pure function with no clock state to consult — which
 the other generators' `describeState()` implementations cannot claim.
 
+## `modulators/randomgestures.js` — `RibbitRandomGestures extends RibbitModulator`
+
+The one modulator that publishes nothing and is patched nowhere: it holds
+`engine` (injected by `Ribbit.createModulator` into every modulator's options,
+the way `createSynth` injects `harmony`), implements the clock's `onSchedule`
+hook, and ramps other objects' `AudioParam`s directly through `scheduleRamp` —
+the same call `commands.js` makes for a console ramp.
+
+`_objects()` resolves the `targets` list (expanding any **group** name through
+`engine._resolveGroup`, with a `seen` set so a cycle terminates) or falls back
+to `scope`; `_candidates()` flattens those to one list of
+`{ objectName, key, param }` so a gesture is a single uniform draw — picking an
+object first would make a one-param processor as loud a voice as a nine-param
+synth. Eligibility is `param.canRandomize` and nothing else: that is exactly the
+set the bulk `/<object> random` uses, so `<param>.r=false` opts a param out of
+both at once and already round-trips in a session file. It reads
+`addressableParams`, so a track contributes its synth's params, and skips
+itself (gesturing its own `depth` would be a loop, not a gesture).
+
+A gesture draws `clamp(current ± depth × range)` — a bounded random walk rather
+than unrelated jumps — and `_nextBeat` advances by whole `gesture_beats` steps
+rather than being derived from the beat number, so changing the interval moves
+the *next* gesture instead of renumbering past ones. `onClockStart()` reseeds
+and rewinds, so `/stop` `/start` replays the take. It sets `lastEventTime` like
+an event generator, which is what lets the mixer strip flash per gesture
+instead of metering an output it doesn't have.
+
+Reproducibility has one honest caveat, worth not rediscovering: the seed fixes
+the sequence of *choices*, but each choice is made among whatever exists at
+that moment, so adding a track mid-take renumbers everything after it.
+
+## `group.js` — `RibbitGroup`
+
+A name and a list of other objects' **names**. No audio, no params, no nodes —
+it exists to be a dispatch target (`commands.js`'s `groupCommand` forwards
+every key it doesn't own to each member's own handler). Names rather than
+references is the load-bearing decision: it lets a group be written before its
+members exist (session load order), survive a `/recall` that tears a member
+down and rebuilds it, serialize as-is, and name another group. The cost is that
+a member removed for good lingers as a name, reported as `(missing)`.
+`normalizeMembers` is exported separately because the console has to normalize
+a `members=` value *before* it can validate the names in it — i.e. before the
+group is told anything.
+
+## `recorder.js` — `RibbitRecorder`
+
+Audio capture to downloadable WAV. One per engine (`ribbit.recorder`), built
+in the `Ribbit` constructor; **not** a clock unit, and **not** part of a
+session snapshot — a take is the output of a performance, not part of its
+description.
+
+Capture is an `AudioWorkletProcessor` whose source is a template literal in
+this file, compiled at runtime from a blob URL (`prepare()`). A blob URL
+rather than a shipped `.js` asset because this package is consumed as plain
+ESM through a bundler that would otherwise need its own rule for "asset that
+must stay a standalone URL at runtime", and there is exactly one processor.
+`prepare()` is separate from `start()` and memoized on `_modulePromise`, with
+`_moduleReady` tracking whether it actually *finished* — the promise exists
+from the moment `prepare()` is called, and constructing an `AudioWorkletNode`
+before its processor is registered throws.
+
+The processor itself does no processing: it copies its input into a 4096-frame
+buffer and posts each full block to the main thread, transferring the
+`ArrayBuffer`s. Two non-obvious details. It writes **zeros** when its input is
+disconnected (`inputs[0]` arrives empty), which is what keeps a multitrack
+take frame-aligned when one channel is torn down mid-recording. And it keeps
+returning `true` until told to `"flush"`, because a processor that returns
+`false` is destroyed immediately and would take its partial block with it —
+`stop()` therefore disconnects the *input* first, posts `"flush"`, and leaves
+the node → sink edge up until the worklet answers `{ done: true }` (with a
+500ms `setTimeout` fallback, since a suspended `AudioContext` never runs
+`process()` again and the answer would never come).
+
+Each worklet node needs a live path to the destination or the graph never
+pulls it, so all of them feed one shared gain at 0 (`_sink`).
+
+`_tapTargets()` is the only difference between the two modes: `stereo` returns
+master alone, `multitrack` returns every track, then every bus, then master.
+Taps read each channel's `output` — post-fader, post-pan, post-mute, the same
+node a send or a patch source reads — so a muted channel records silence.
+Every node is created and connected inside one synchronous block in `start()`,
+so they all join the graph on the same render quantum and the files need no
+per-tap offset correcting.
+
+A take holds unconcatenated blocks (`{ name, blocks, frames }` per tap) so
+capture is pure appends; `_flatten(tap, frames)` does the one large
+concatenation at save time, trimmed to the shortest tap. Because late flush
+blocks append to those same arrays, `stop()` needs nothing awaited — only a
+`save()` called within milliseconds of it would miss them.
+
+`wavBytes`/`encodeWAV` write interleaved WAV — format 3 (IEEE float, 32-bit)
+or format 1 (PCM, 16-bit with clamping rather than wrapping, since a wrapped
+over-full-scale sample is a loud click). `buildZip` is a store-only ZIP
+(CRC32 table, local + central headers, EOCD) — worth the sixty lines because N
+sequential downloads is a browser permission prompt and a mess of a Downloads
+folder, and WAV of music barely compresses anyway.
+
+`maxMinutes` (default 5) is a safety stop checked against the first tap only,
+since every tap advances together; `describe()` reports projected memory
+because that, not time, is what the cap is protecting.
+
 ## `patch.js` — `RibbitPatch` / `RibbitEventPatch`
 
 `RibbitPatch`: one continuous "patch cable" — connects a source object's
@@ -1331,7 +1507,9 @@ values and a `paramKey`), `listAutomation` (indexed, decoded),
 router knows how to talk to: `channelCommand` handles a track, a bus, or
 master (gain/pan — and a track's synth's own params/options, routed through
 the track's name — via `applyParams`/`applyOptions`, plus channel-specific
-commands: `add_event`/`events`/`remove_event=`/`clear_events`, the automate
+commands: `add_event`/`events`/`remove_event=`/`clear_events`,
+`mute`/`unmute`/`solo`/`unsolo` (each accepting an explicit value too, so
+`mute=false` is `unmute`; `solo` refused on master), the automate
 family, `synth=`/`add_processor=`, and routing: `out=`/`add_send=`/
 `remove_send=`/`send=`+`send_gain=` against the channel's own `sends` — see
 `channel.js`'s `addSend`/`removeSend`/`connect` above); `paramObjectCommand`
@@ -1357,14 +1535,41 @@ applying whatever param/command was given. The help builders read
 list available `synth=`/`add_processor=`/`add_modulator` types without
 hardcoding them.
 
+`groupCommand` is the third shape, and the only one with no object of its own
+to talk to. It consumes five keys (`members=`/`add_member=`/`remove_member=`/
+`remove_self`/`help`) and forwards everything else — `at=` included — verbatim
+to each member, so it holds no knowledge of any command it forwards and works
+with commands written before groups existed. Membership edits validate names
+*before* deferring, like every other name a command takes; forwarding wraps
+each member in its own try/catch so one member throwing doesn't cost the
+others; and the set of groups already entered on the line is threaded through
+so a cycle is entered once. Its completion keywords are its own five plus
+whatever its *first* resolvable member accepts — a group is nearly always
+homogeneous, and completing nothing at all would read as the feature breaking
+the moment you address a group.
+
 `createCommandRouter(nllc)`
 returns `{ executeCommand, suggest }` — `executeCommand` ties the above into
 one function, first splitting one submitted line into multiple `/name ...`
 segments (`splitCommands`, letting `/track_1 gain=0
-8 /reverb wet=0.9 6b` run both together) before dispatching each — in order,
-against top-level `commands`, `master`, `nllc.tracks`, `nllc.buses`,
-`nllc.processors`, then `nllc.modulators`. See
+8 /reverb wet=0.9 6b` run both together) before dispatching each — top-level
+`commands` first, then `objectHandler(name)`, which resolves `master`,
+`nllc.tracks`, `nllc.buses`, `nllc.processors`, `nllc.modulators`,
+`nllc.groups` in that order. That lookup is a named function rather than
+inline because `groupCommand` needs exactly it to forward to members; the
+alternative would be re-entering `executeOne` with a rebuilt command string,
+i.e. serializing parsed params back to text and re-parsing them. See
 [adding-commands.md](adding-commands.md).
+
+`record` is the only handler besides `load_session` that is **`async`**. It
+awaits `recorder.prepare()` (compiling the AudioWorklet module) *before*
+resolving `at=`, so that only the synchronous `recorder.start()` is ever
+deferred — a rejection thrown inside a bare `scheduleAt` timer has no command
+left to report against. `run()` already turns a returned promise's rejection
+into the same clean error string a sync throw gets, and `executeCommand` only
+pays for `Promise.all` when a segment actually came back as one.
+`applyRecorderSettings` is shared by `record` and `recording` so the two can't
+drift on what `mode=`/`bits=`/`max_minutes=` mean.
 
 `suggest(input, cursorPos)` is the console's ghost-text completion (consumed
 by `CodeEditor.svelte` — see [architecture.md](architecture.md#console-suggestions-ghost-text-completion)),
@@ -1393,6 +1598,11 @@ names, `beat`/`cycle`, `linear`/`exponential`/`target` for `curve=`, an
 object's param names for `automate=`, event/automation indices for
 `remove_event=`/`remove_automation=`, existing ids/names/states, and any
 option's declared `choices` — a waveform completes from its own list).
+A value that *exactly* matches a candidate is never completed past: since the
+console accepts **and submits** ghost text on Enter, with `czsynth`'s line
+selects (`1`, `2`, `1+1`, `1+2`) typing `lines=1` and hitting Enter would
+otherwise run `lines=1+1`. Keys are unaffected — an exactly-typed `gain` still
+completes to `gain=`, which is what you wanted.
 `pickBestMatch` returns the first candidate that extends the typed prefix —
 no ranking or cycling among several matches yet (see
 [adding-commands.md](adding-commands.md#keeping-suggestions-in-sync) for what
@@ -1411,17 +1621,38 @@ The top-level object and factory/registry hub:
   read-only (`Object.keys(...)`) for callers outside this module — currently
   just `commands.js`'s `channelHelp`/`paramObjectHelp`, so `/track_1 help`
   can list available types without a second hardcoded copy of this list.
-- `createTrack`/`createBus`/`createSynth`/`createProcessor`/`createModulator` —
+- `createTrack`/`createBus`/`createSynth`/`createProcessor`/`createModulator`/
+  `createGroup` —
   construct + register (with the clock, and with `tracks`/`buses`/
-  `processors`/`modulators` for name-based lookup) in one call. `createSynth`
+  `processors`/`modulators`/`groups` for name-based lookup) in one call.
+  `createSynth`
   also threads `this.harmony` (one shared context constructed once in the
   `Ribbit` constructor, see [harmony.js](#harmonyjs)) into every synth it
-  builds. Both `createTrack` and `createBus` resolve an `out=` option (default
+  builds, and `createModulator` threads `this` as `engine` for the same reason
+  — a modulator that modulates *the session* has no other way to find out what
+  exists (`randomgestures`; every other modulator ignores it). A group is
+  registered but not a clock unit and deliberately **not** resolvable by
+  `_resolveObject`: it has no `input`/`output`, so naming one as a send
+  destination or patch endpoint must fail rather than half-work. Note the
+  constructor declares `tracks`/`buses` *before* building master, since
+  master's own `connect()` to the speakers goes through `addSend`, which
+  re-derives solo state and reads both. Both `createTrack` and `createBus` resolve an `out=` option (default
   `"master"`) via `_resolveObject` and call `channel.connect(destObject,
   destName)` to set up the one default send a fresh track/bus starts with.
 - `setTrackSynth` — swap a track's synth at runtime (used by `/track_1
   synth=sampler`), correctly deregistering the old synth from the clock and
   registering the new one.
+- `updateSolo()` — recomputes, for the whole session, which channels solo is
+  currently silencing, and applies it via each channel's `_setSoloSilenced`.
+  Called by `RibbitChannel.setSoloed` (which knows its own flag changed and
+  nothing about anyone else's), by `addSend`/`removeSend` (the audible set is
+  derived from the sends graph, so re-routing under a live solo has to
+  re-derive it), and by `removeTrack`/`removeBus` (removing the only soloed
+  channel has to let everything back in). The rule: grow an audible set
+  outward from every soloed channel along sends in **both** directions until it
+  stops growing, and silence the rest. Downstream keeps a soloed track's reverb
+  bus alive; upstream keeps a soloed bus's feeder tracks alive. Master is never
+  in the pool.
 - `removeTrack`/`removeBus`/`removeProcessor`/`removeModulator` — the inverse
   of the `create*` methods above; each first calls
   `_removePatchesReferencing(object)` *and* `_removeSendsReferencing(object)`
@@ -1430,8 +1661,9 @@ The top-level object and factory/registry hub:
   processor inserts and its own sends).
 - `createPatch({ sourceName, destName, depth })` / `removePatch(patch)` — the
   modular-patching layer. `_resolveObject(name)` resolves a bare name against
-  every addressable object (master, then tracks, buses, processors,
-  modulators — the same order `executeOne`'s dispatch uses); `_resolveDest
+  every addressable object *except a group* (master, then tracks, buses,
+  processors, modulators — the same order `executeOne`'s dispatch uses;
+  `_resolveGroup` is separate for exactly that reason); `_resolveDest
   ("name.param")` splits on the dot and looks up
   `object.params[paramKey].audioParam` — one lookup for every kind of object,
   since channels/processors/modulators all expose `params` as `{ key:
@@ -1487,6 +1719,10 @@ The top-level object and factory/registry hub:
   permanently shadowed; de-duplicating globally at creation time makes that
   impossible. **A new top-level command must be added to `RESERVED_NAMES`
   too** (a `console.warn` at router construction catches a forgotten one).
+- `recorder` — a `RibbitRecorder` (see [recorder.js](#recorderjs--ribbitrecorder))
+  built here and torn down by `dispose()`, since an unflushed recorder holds
+  timers and an unsaved take holds hundreds of megabytes. It is deliberately
+  neither a clock unit nor part of a session snapshot.
 
 ## `session.js`
 
@@ -1497,11 +1733,18 @@ instance rather than holding any state of their own:
 - `snapshotSession(nllc)`/`sessionToJSON(nllc)` — a pure, JSON-serializable
   snapshot of everything live: clock/harmony, master/every bus/every track
   (each with `params`/`processors`/`sends`, a track also its synth's
-  `type`/`options`/`params`/`events`), every modulator, every patch (an
+  `type`/`options`/`params`/`events`), every modulator, every group
+  (`{ name, members }`), every patch (an
   `RibbitEventPatch`'s missing `depth` is handled by `serializePatch` checking
   `patch.params.depth` before reading it, rather than assuming every patch is
   shaped like a regular `RibbitPatch` — same guard `reconcilePatches` below
   needs).
+  A channel's `muted`/`soloed` are written **only when true**, and `groups` is
+  omitted when empty, so a session using neither serializes byte-identically to
+  how it did before they existed — the same "omit the default" rule
+  `no_random` follows. `_soloSilenced` is never written: it's derived from
+  everyone else's `soloed` and recomputed by `updateSolo` as each channel's
+  state is restored.
   Each `params` block is accompanied by an optional sibling `no_random` array
   (`serializeNoRandom`) listing the params whose `.r` flag is off, so which
   params a bulk `random` touches survives a round trip. It records the whole
@@ -1557,8 +1800,19 @@ instance rather than holding any state of their own:
   uses — no second construction path to keep in sync. Order matters:
   buses/tracks first (with a throwaway default send), then every bus's/
   track's *real* saved sends once every possible destination by name
-  actually exists, then modulators, then patches last, since a patch
-  resolves both endpoints by name against whatever's already been built.
+  actually exists, then modulators, then patches, then groups last, since both
+  resolve their endpoints/members by name against whatever's already been
+  built.
+  It also carries a **rename map**: `_uniqueName` silently de-duplicates a name
+  that collides (with a duplicate in the same file, or with a reserved command
+  name — a track called `states`), and every later cross-reference in the file
+  is by name, so each create call records the name it actually got and sends,
+  patch endpoints and group members are rewritten through it, with a
+  `notify()` saying so. Before this, the first such reference resolved to
+  nothing and the load stopped half-applied — one badly-named track cost you
+  every modulator and patch after it. Not rewritten: a `/save`d state inside
+  the same file, since those are whole nested snapshots reconciled by name at
+  `/recall` time.
   This is the vehicle for `/load_session` (see `commands.js`) — a cold-start
   operation, so unlike `applySnapshot` below there's no attempt to be
   glitch-free.

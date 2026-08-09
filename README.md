@@ -3,17 +3,22 @@
 A browser audio engine for live-coding music, built on the Web Audio API. It
 owns a graph of **tracks** (each wrapping a **synth**), **buses** (shared send
 destinations for sub-mixes or shared effects), **processors** (insert effects —
-reverb and delay, plus compression, saturation, tilt EQ and limiting for making
-a mix louder and more even), **modulators** (control sources like LFOs,
-**patched** into any parameter), and a **master** bus — all playing against a
-shared, looping, lookahead-scheduled **clock**. A small, headless, text-driven
+reverb, delay, a state-variable filter and a comb filter, plus compression,
+saturation, tilt EQ and limiting for making a mix louder and more even),
+**modulators** (control sources like LFOs, **patched** into any parameter),
+**groups** (one name addressing several objects at once), and a **master**
+bus — all playing against a
+shared, looping, lookahead-scheduled **clock**. Every channel has mute and
+solo, and the whole thing can be **recorded** to WAV — master in stereo, or
+every channel as its own file. A small, headless, text-driven
 take on Max/MSP or SuperCollider.
 
 Ribbit is UI-agnostic: it's plain browser ESM with no framework dependency. You
 drive it either by calling its methods directly, or through its built-in
 slash-command router — a usable control surface with no interface required. The
-whole session (every track, bus, processor, modulator, patch, and saved state)
-serializes to and from a `.json` file.
+whole session (every track, bus, processor, modulator, patch, group, and saved
+state) serializes to and from a `.json` file; a recording is downloaded
+separately, as audio.
 
 Ribbit is the engine extracted from **NLLC** (Natural Language Live Coding); the
 `nllc` app in this workspace is one interface built on top of it.
@@ -50,6 +55,13 @@ executeCommand("/patch source=wobble dest=lead.cutoff depth=400");
 
 // Option B — call the graph directly:
 const track = engine.createTrack({ name: "bass", synth: "oscsynth" });
+
+// Record the output — stereo master, or every track/bus/master as its own
+// file. Both ends take at=beat/at=cycle, so a take can be a whole number of
+// loops; /save_record downloads a .wav (or a .zip of .wavs in multitrack).
+await executeCommand("/record mode=multitrack at=cycle");
+executeCommand("/stop_record at=cycle");
+executeCommand("/save_record");
 
 // Save / load the whole session as JSON:
 import { sessionToJSON } from "ribbit";
@@ -146,6 +158,8 @@ Import surface (see [`src/index.js`](src/index.js)):
   `RibbitParam`, `RibbitParamSources`, `RibbitEvent`, `RibbitSynth`,
   `RibbitProcessor`, `RibbitModulator`, `RibbitPatch`, `RibbitEventPatch`,
   plus the `automation`/`taper` helpers
+- **Recording** — `RibbitRecorder` (reached in practice as `engine.recorder`),
+  `RECORDER_MODES`, `RECORDER_BIT_DEPTHS`, `encodeWAV`
 - **Patterns & randomness** — `parsePattern`, `cellAt`, `fetchPattern`,
   `fetchPatternManifest`, `mulberry32`, `randomSeed`
 - **Built-in types** — `RibbitOscSynth`, `RibbitSampler`, `RibbitPercSampler`

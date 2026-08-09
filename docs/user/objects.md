@@ -683,14 +683,15 @@ instead. See [commands.md](commands.md#buses-and-sends) for the full
 
 ## Processors (`add_processor=` on any channel)
 
-Seven processors, in two groups.
+Nine processors, in two groups.
 
 **Effects** — `reverb` and `delay` — add something *beside* your signal. The dry
 path always runs at unity and the wet path is added on top, so `wet=0` means
 "off" and `wet=1` means "as much again".
 
-**Dynamics and tone** — `compressor`, `saturator`, `tilt`, `limiter` and the
-`goodenizer` that combines all four — act *on* the signal itself. Where they
+**Dynamics and tone** — `compressor`, `saturator`, `tilt`, `svf`, `comb`,
+`limiter` and the
+`goodenizer` that combines four of them — act *on* the signal itself. Where they
 have a `mix` at all it's a true crossfade: `mix=1` is fully processed, `mix=0`
 is fully bypassed, and `mix=0.5` is half of each. That difference is not
 cosmetic. A compressor whose dry path ran at unity could never actually tame a
@@ -723,7 +724,11 @@ lines that feed back into *each other* (ping-pong) rather than themselves.
 | `time` | `0.375`s | `time` | Base delay time (right channel is offset by `stereoOffset` above this). Clamped to `0..5` (the delay node's own maximum). |
 | `feedback` | `0.35` | `feedback` | Cross-feedback amount (applied symmetrically to both channels). Clamped to `0..0.95` — at or past unity the cross-feeding lines recirculate a growing signal forever (a runaway loop, not an effect). |
 | `wet` | `0.3` | `wet` | Wet-signal mix level. Clamped to `0..2`. |
-| `stereoOffset` | `0.06`s | `stereoOffset` (option) | Extra delay time on the right channel for stereo width (`0..1`s). Runtime-settable option — not rampable. |
+| `stereoOffset` | `0.06`s | `stereoOffset` (option) | Extra delay time on the right channel for stereo width (`0..1`s). Runtime-settable option — not rampable, though `at=` works like anywhere else. |
+
+`time` and `feedback` each drive both delay lines, and do so through ramps as
+well as instant sets — `/delay time=0.75 8b` glides both channels together,
+keeping the stereo offset intact the whole way.
 
 ### `compressor` — `RibbitCompressor`
 
@@ -843,6 +848,72 @@ any other. Both params ramp, so it doubles as a sweep:
 /tilt pivot=2500          move where the trade happens
 ```
 
+### `svf` — `RibbitSVF`
+
+> A state-variable filter: one cutoff and resonance read out as a lowpass,
+> highpass, bandpass or notch.
+
+The filter. `tilt` is the one you reach for when a mix sounds wrong; this is
+the one you *play* — sweep it with an LFO, close it over eight bars, ring it at
+high resonance.
+
+| Constructor option | Default | Runtime param | Meaning |
+|---|---|---|---|
+| `cutoff` | `1000`Hz | `cutoff` | Where the filter acts (`20..18000`). |
+| `resonance` | `1` | `resonance` | Emphasis at the cutoff (`0.1..30`). High values ring, and get **loud** — a resonant filter has real gain there. |
+| `mix` | `1` | `mix` | Dry/wet crossfade (`0..1`). A true crossfade, so `mix=0.5` is parallel filtering — a notch at half mix is a gentle scoop rather than a hole. |
+| `mode` | `lowpass` | `mode` (option) | Which response comes out: `lowpass`, `highpass`, `bandpass`, `notch`. Not rampable — but `at=` works, so `/filt mode=highpass at=cycle` switches on the downbeat. |
+
+Both `cutoff` and `resonance` are ordinary rampable params and valid patch
+destinations, which is the whole point:
+
+```
+/lead add_processor=svf
+/svf cutoff=300 mode=lowpass
+/svf cutoff=6000 8b                  open it over 8 beats
+/add_modulator type=lfo name=sweep freq=0.2
+/patch source=sweep dest=svf.cutoff depth=2000
+```
+
+### `comb` — `RibbitComb`
+
+> A comb filter: the signal plus a very short delayed copy of itself,
+> feedforward (notches, flanger-like) or feedback (peaks, a ringing resonator).
+
+A delay so short you hear it as tone rather than as an echo. Summing a signal
+with a copy of itself reinforces every frequency whose period divides the delay
+and cancels the ones in between — a rake of peaks and notches at multiples of
+1/`time`.
+
+| Constructor option | Default | Runtime param | Meaning |
+|---|---|---|---|
+| `time` | `0.008`s | `time` | Delay length (`0.0002..0.05`s, i.e. 20Hz–5kHz as a comb frequency). Patch an LFO here and the feedforward mode is a flanger. |
+| `feedback` | `0.7` | `feedback` | How much copy (`-0.95..0.95`). **Bipolar**: a negative value inverts the copy, putting every peak where a notch was — the hollow, half-an-octave-down version of the same setting. |
+| `tone` | `8000`Hz | `tone` | A lowpass on the delayed copy (`200..18000`). In feedback mode it's inside the loop, so each repeat is darker than the last and the ring decays like a plucked string. |
+| `mix` | `1` | `mix` | Dry/wet crossfade (`0..1`). |
+| `mode` | `feedback` | `mode` (option) | `feedback` (the copy recirculates — peaks, and it rings with a pitch of its own) or `feedforward` (one copy — notches, the body of a flanger). |
+
+```
+/pad add_processor=comb
+/comb mode=feedforward feedback=-0.8
+/add_modulator type=lfo name=flange freq=0.15
+/patch source=flange dest=comb.time depth=0.004
+```
+
+**In `mode=feedback`, `time` can't go below about 3ms** (a comb frequency of
+~344Hz), and asking for less silently resonates at that floor instead. Web
+Audio forces any feedback loop to at least one processing block, and that's how
+long a block is. `/comb` says so:
+
+```
+/comb
+comb (p1): ... [comb 2000Hz — but feedback can't go above the feedback floor 345Hz,
+so it is resonating there; use mode=feedforward for higher]
+```
+
+`mode=feedforward` is in no loop and combs the whole range, so that's the mode
+for anything above a few hundred Hz.
+
 ### `limiter` — `RibbitLimiter`
 
 > A loudness ceiling: a boost stage into a fast, high-ratio compressor that
@@ -939,11 +1010,13 @@ processor, but it never joins any channel's chain. On its own it does
 nothing audible; it only matters once patched into a parameter with
 `/patch` — see [commands.md](commands.md#modulators-and-patches).
 
-There are seven, in two shapes. `lfo` and `cv` both produce a **continuous
+There are eight, in three shapes. `lfo` and `cv` both produce a **continuous
 signal** patched into a parameter (`lfo` moves by itself, `cv` holds
 whatever you set); `randomnotes`, `markovpercs`, `euclidpercs`,
 `patternvariator` and `chorale` instead generate **discrete notes** and patch
-into a track's synth rather than a parameter.
+into a track's synth rather than a parameter. `randomgestures` is the odd one
+out: it is patched **nowhere at all**, and instead roams the session by itself,
+gliding parameters wherever you point it.
 
 The five generators differ in *what decides whether a note happens*:
 
@@ -1368,6 +1441,101 @@ when it isn't — six voices want `spread=3`, four are happy at `1`.
 The `chorale-drift` example session runs three of them at once: close sevenths
 on a `tapepad`, ninths an octave up, and a one-voice bass line, with the first
 patched into two tracks so a pad and a `karplus` sing the identical voicing.
+
+### `randomgestures` — `RibbitRandomGestures`
+
+> Roams the live session and glides random parameters to new values — a
+> seeded, self-playing hand on the controls.
+
+**This one takes no patch.** Create it and it starts working:
+
+```
+/add_modulator type=randomgestures name=drift
+/drift gesture_beats=8 glide=6 depth=0.2
+/start
+```
+
+Every `gesture_beats` beats it picks one parameter somewhere in the session and
+ramps it, over `glide` beats, to a new value near where it currently sits.
+Because `glide` can be longer than `gesture_beats`, several parameters can be
+moving at once — which is the difference between this sounding like a player
+and like a randomizer.
+
+| Constructor option | Default | Runtime param | Meaning |
+|---|---|---|---|
+| `gesture_beats` | `4` | `gesture_beats` | Beats between gestures (`0.25..64`). |
+| `glide` | `2` | `glide` | How long one gesture takes, in beats (`0..64`). |
+| `depth` | `0.3` | `depth` | How far a gesture may move a param, as a fraction of that param's own range, either side of where it is (`0..1`). A bounded random *walk*, not unrelated jumps: at `0.05` it breathes, at `1` any gesture can land anywhere. |
+| `probability` | `1` | `probability` | Chance a due gesture actually fires (`0..1`). Below 1 the gestures stop being metronomic without changing the interval. |
+| `seed` | random | `seed` (option) | The whole sequence follows from this. `seed=random` re-rolls; `/stop` `/start` replays the same take from the top. |
+| `scope` | `all` | `scope` (option) | Which kinds of object are in play: `all`, `tracks`, `buses`, `processors`, `modulators`, `master`. |
+| `targets` | `""` | `targets` (option) | A comma-separated list of object names, overriding `scope`. **A group name expands to its members**, which is the tidy way to aim it. |
+| `params` | `""` | `params` (option) | A comma-separated list of param *names*: `params=cutoff` sweeps filters and nothing else. Empty means every eligible param. |
+
+**What it's allowed to touch is the same set the bulk `random` command
+touches** — any param with a declared range whose `.r` flag is on (see
+[Which params a bulk `random` touches](commands.md#which-params-a-bulk-random-touches)).
+So faders are out of bounds by default, and `/lead cutoff.r=false` protects one
+param from both at once. There's no second opt-out list to learn.
+
+Aim it with a group, and check what's in range before you start:
+
+```
+/add_group name=pads members=pad1,pad2
+/drift targets=pads
+/drift
+drift: ... [24 params in range · 9 gestures · last: pad1.cutoff 812.400 -> 2140.118 over 2b]
+```
+
+`0 params in range` means it will do nothing at all — usually a `params=` name
+that nothing in `targets=` actually has.
+
+One caveat about reproducibility: the seed fixes the sequence of *choices*, but
+each choice is made among whatever exists at that moment, so adding a track
+mid-take renumbers everything after it. Same session, same seed, same
+performance.
+
+## Groups (`/add_group`)
+
+A group is a name standing for several other names — say it once, and every
+member gets it:
+
+```
+/add_group name=drums members=kick,snare,hats
+/drums gain=0 4b at=cycle
+```
+
+It holds no audio and changes nothing about the signal path (that's what a
+[bus](#buses-add_bus) is for) — it only saves you typing the same command at
+four objects. Members can be tracks, buses, `master`, processors, modulators,
+or other groups. Full reference: [commands.md](commands.md#groups).
+
+## Mute and solo
+
+Every channel — track, bus, or master — has `mute`/`unmute`, and everything
+except master has `solo`/`unsolo`:
+
+```
+/kick mute            silence it; the fader doesn't move
+/kick unmute
+/lead solo            hear only lead (and anything it feeds, or that feeds it)
+/lead unsolo
+```
+
+`mute` is not "turn the fader down". The fader keeps its position and its saved
+value, a `gain` ramp already in flight keeps running underneath, and unmuting
+puts you back exactly where you were. It silences the channel's **sends** too,
+so a muted track feeds a reverb bus nothing.
+
+`solo` is a property of the whole session rather than of one channel. Anything
+that can reach a soloed channel through sends, or be reached from one, stays
+audible — so soloing a track keeps its reverb bus working, and soloing that bus
+keeps the tracks feeding it playing. Several channels can be soloed at once.
+Master refuses `solo` (everything already goes through it).
+
+Both are deferrable (`/kick mute at=cycle`), both show in `/tracks` as
+`kick [muted]` / `[solo]` / `[silenced by solo]`, both round-trip in a session
+file, and both are the M/S buttons on each mixer strip.
 
 ## Events
 

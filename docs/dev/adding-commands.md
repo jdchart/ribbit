@@ -129,6 +129,10 @@ same fix for the same two cases:
   suggestible the moment it's added to the `commands` object in step 1
   above. (It still needs its `RESERVED_NAMES` entry in `ribbit.js`, and a
   `TOP_LEVEL_KEYWORDS` entry if it has params of its own worth completing.)
+- A new **channel command works through groups for free**. `groupCommand`
+  forwards every key it doesn't own to each member's own handler, so it has no
+  per-command list to extend — `/drums <your new key>` works the day you add
+  it. Nothing to do here; worth knowing so you don't go looking for a list.
 - A new **rampable param** (step 2) needs nothing extra either —
   `resolveKeywordsFor` reads the target object's own `params` map directly.
   A new **option** likewise (the `options` map is read the same way), and

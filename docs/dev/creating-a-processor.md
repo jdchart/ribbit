@@ -117,12 +117,9 @@ Points worth noting, all copied from `processors/reverb.js`/`processors/delay.js
   unbounded param quietly drops out of both and prints
   `[no random: unbounded]` in `help`.
 - **A param that has to fan a value out across more than one node** (like
-  `RibbitDelay`'s `time`, which writes both `delayL.delayTime` and
-  `delayR.delayTime`, the latter offset for stereo width) still fits
-  `RibbitParam` — pass whichever node should be the "primary" one (the one
-  ramping/`at=` deferral will animate) as the wrapped `AudioParam`, and
-  override the plain instant-set path with `onSet`. See `processors/delay.js` for the
-  real example.
+  `RibbitDelay`'s `time`, which drives both delay lines) wants the
+  `ConstantSourceNode` route below, not `onSet`. See `processors/delay.js`,
+  `processors/comb.js` or `processors/tilt.js` for the real examples.
 - **A param that isn't backed by a real `AudioParam` at all** splits into two
   cases, and they get opposite answers:
   - **There's no continuous value to sweep** (`amount` above, whose "value" is
@@ -141,14 +138,15 @@ Points worth noting, all copied from `processors/reverb.js`/`processors/delay.js
     Call `this._paramSources.dispose()` from your own `dispose()`.
 - **A param that must *ramp* across several nodes needs the `ConstantSourceNode`
   route, not `onSet`.** `onSet` only overrides the instant-set path, so a ramp
-  animates the primary node and strands the others — that's the standing
-  `RibbitDelay` `time`/`feedback` limitation. Connecting one
+  animates the primary node and strands the others — which is why **no shipped
+  param uses it**. Connecting one
   `ConstantSourceNode`'s offset into several `AudioParam`s instead (optionally
   through scaling/inverting gains) makes a single param drive all of them
   through instant sets, ramps, `at=` deferral and `/patch` alike, because
   `AudioParam` connections *sum* onto the intrinsic value. `RibbitTilt` drives
   two shelf gains in opposite directions this way; `createCrossfade` drives two
-  gains for the same reason.
+  gains for the same reason; `RibbitDelay` drives both delay lines plus a
+  second constant for `stereoOffset`; `RibbitComb` drives both branches.
 - **Implement `dispose()` if you own running nodes.** It's duck-typed, called by
   `Ribbit.removeProcessor` and `Ribbit.dispose`. The base implementation
   disposes `this._paramSources`; override and call `super.dispose()` if you own

@@ -166,6 +166,13 @@ function serializeChannel(channel, { includeSends = true } = {}) {
     const data = {
         params: serializeParams(channel.params),
         ...serializeNoRandom(channel.params),
+        // Both written only when true, so a session with nothing muted or
+        // soloed serializes exactly as it did before these existed — the
+        // same "omit the default" rule no_random follows. `_soloSilenced`
+        // is deliberately absent: it's derived from everyone else's `soloed`
+        // (see Ribbit.updateSolo) and recomputed on load.
+        ...(channel.muted ? { muted: true } : {}),
+        ...(channel.soloed ? { soloed: true } : {}),
         processors: channel.processors.map(serializeProcessor),
         automation: serializeAutomation(channel),
     };
@@ -216,6 +223,11 @@ export function snapshotSession(ribbit) {
         tracks: ribbit.tracks.map(serializeTrack),
         modulators: ribbit.modulators.map(serializeModulator),
         patches: ribbit.patches.map(serializePatch),
+        // Omitted when there are none, so a session that predates groups
+        // round-trips byte-identically (same rule as `muted` above).
+        ...(ribbit.groups.length
+            ? { groups: ribbit.groups.map((group) => ({ name: group.name, members: [...group.members] })) }
+            : {}),
     };
 };
 
@@ -250,11 +262,24 @@ function applyChannelParams(channel, data) {
         channel.params[key]?.set(value);
     }
     applyNoRandom(channel.params, data.no_random);
+    applyChannelState(channel, data);
 };
 
-function loadProcessors(ribbit, channel, processorsData = []) {
+// Mute/solo, restored from a session or a /save'd state. Absent keys mean
+// false — a file written before these existed described a session where
+// nothing was muted, which is exactly what that reads as. setSoloed
+// re-derives the whole session's solo state each time (see
+// Ribbit.updateSolo), so the last channel restored leaves it correct however
+// many were soloed.
+function applyChannelState(channel, data) {
+    channel.setMuted(!!data.muted);
+    channel.setSoloed(!!data.soloed);
+};
+
+function loadProcessors(ribbit, channel, processorsData = [], rename = () => {}) {
     for (const data of processorsData) {
         const processor = ribbit.createProcessor(data.type, { name: data.name, ...data.options });
+        rename(data.name, processor.name);
         channel.addProcessor(processor);
         processor.active = data.active;
         for (const [key, value] of Object.entries(data.params)) {
@@ -267,12 +292,15 @@ function loadProcessors(ribbit, channel, processorsData = []) {
 
 // Replaces whatever sends a freshly-created channel starts with (its default
 // send to master) with the real saved list — called only once every track/
-// bus this session might reference by name already exists.
-function loadSends(ribbit, channel, sendsData = []) {
+// bus this session might reference by name already exists. `resolveName` maps
+// a name as written in the file to the name that object actually got (see
+// loadSession's rename map).
+function loadSends(ribbit, channel, sendsData = [], resolveName = (name) => name) {
     for (const send of [...channel.sends]) channel.removeSend(send.id);
     for (const data of sendsData) {
-        const destObject = ribbit._resolveObject(data.destName);
-        if (destObject) channel.addSend(destObject, { destName: data.destName, gain: data.gain });
+        const destName = resolveName(data.destName);
+        const destObject = ribbit._resolveObject(destName);
+        if (destObject) channel.addSend(destObject, { destName, gain: data.gain });
     }
 };
 
@@ -285,6 +313,9 @@ function clearSession(ribbit) {
     for (const bus of [...ribbit.buses]) ribbit.removeBus(bus);
     for (const modulator of [...ribbit.modulators]) ribbit.removeModulator(modulator);
     for (const processor of [...ribbit.master.processors]) ribbit.removeProcessor(processor);
+    // Groups own nothing, so there's nothing to tear down — but a stale one
+    // would survive the load and then name objects from the previous session.
+    ribbit.groups = [];
     // Cleared here rather than only reassigned at the end of loadSession, so
     // loading a file with no readme doesn't leave the previous session's one
     // attached to it (and then serialize it back out on the next save).
@@ -347,19 +378,41 @@ export function loadSession(ribbit, json) {
     ribbit.harmony.root = json.harmony.root;
     ribbit.harmony.scale = [...json.harmony.scale];
 
+    // Every object whose requested name wasn't available, mapped to the name
+    // it actually got. Ribbit._uniqueName silently de-duplicates past a
+    // collision — with another object in the same file, or with a reserved
+    // top-level command name (a track called "states") — and *everything*
+    // below that refers to an object by name (a send's destination, a patch's
+    // two endpoints) is written in terms of the name in the file. Without
+    // this map, the first such reference finds nothing and the load stops
+    // half-applied, which is how a session with one badly-named track used to
+    // lose all of its modulators and patches.
+    const renames = new Map();
+    const rename = (wanted, actual) => { if (wanted !== actual) renames.set(wanted, actual); };
+    const resolveName = (name) => renames.get(name) ?? name;
+    // The object part of a patch destination ("reverb.wet", "lead.notes") is
+    // a name too; the param/".notes" half never is.
+    const resolveDestName = (destName) => {
+        const dot = String(destName).indexOf(".");
+        if (dot === -1) return destName;
+        return `${resolveName(destName.slice(0, dot))}${destName.slice(dot)}`;
+    };
+
     applyChannelParams(ribbit.master, json.master);
-    loadProcessors(ribbit, ribbit.master, json.master.processors);
+    loadProcessors(ribbit, ribbit.master, json.master.processors, rename);
     ribbit.master.automation = rebuildAutomation(ribbit.master, json.master.automation);
 
     for (const data of json.buses ?? []) {
         const bus = ribbit.createBus({ name: data.name });
+        rename(data.name, bus.name);
         applyChannelParams(bus, data);
-        loadProcessors(ribbit, bus, data.processors);
+        loadProcessors(ribbit, bus, data.processors, rename);
         bus.automation = rebuildAutomation(bus, data.automation);
     }
 
     for (const data of json.tracks ?? []) {
         const track = ribbit.createTrack({ name: data.name, synth: data.synth.type, ...data.synth.options });
+        rename(data.name, track.name);
         track.source.active = data.active;
         applyChannelParams(track, data);
         loadProcessors(ribbit, track, data.processors);
@@ -374,14 +427,15 @@ export function loadSession(ribbit, json) {
     // Sends can point at any bus/track, including ones later in these lists,
     // so they're only wired up once every possible destination exists.
     for (const data of json.buses ?? []) {
-        loadSends(ribbit, ribbit.buses.find((b) => b.name === data.name), data.sends);
+        loadSends(ribbit, ribbit.buses.find((b) => b.name === resolveName(data.name)), data.sends, resolveName);
     }
     for (const data of json.tracks ?? []) {
-        loadSends(ribbit, ribbit.tracks.find((t) => t.name === data.name), data.sends);
+        loadSends(ribbit, ribbit.tracks.find((t) => t.name === resolveName(data.name)), data.sends, resolveName);
     }
 
     for (const data of json.modulators ?? []) {
         const modulator = ribbit.createModulator(data.type, { name: data.name, ...data.options });
+        rename(data.name, modulator.name);
         for (const [key, value] of Object.entries(data.params)) {
             modulator.params[key]?.set(value);
         }
@@ -390,10 +444,32 @@ export function loadSession(ribbit, json) {
     }
 
     for (const data of json.patches ?? []) {
-        ribbit.createPatch({ sourceName: data.sourceName, destName: data.destName, depth: data.depth });
+        ribbit.createPatch({
+            sourceName: resolveName(data.sourceName),
+            destName: resolveDestName(data.destName),
+            depth: data.depth,
+        });
+    }
+
+    // Last, and by name: a group's members can be anything above (including
+    // another group), so this is the only point at which every name it might
+    // hold is guaranteed to have been created — and to have been renamed, if
+    // it was going to be.
+    for (const data of json.groups ?? []) {
+        ribbit.createGroup({ name: data.name, members: (data.members ?? []).map(resolveName) });
     }
 
     ribbit.states = { ...(json.states ?? {}) };
+
+    // Said out loud rather than silently absorbed: the file no longer
+    // describes what's live, so a /save_json writes different names back out,
+    // and any /save'd state inside it still refers to the old ones (those are
+    // whole nested snapshots — reconciled by name at /recall time, not
+    // rewritten here). Renaming the object in the file is the real fix.
+    if (renames.size) {
+        const list = [...renames].map(([wanted, actual]) => `"${wanted}" -> ${actual}`).join(", ");
+        ribbit.notify(`renamed on load (name already taken): ${list}. Saved states in this file still refer to the original names.`);
+    }
 
     // Printed last, once the graph it describes actually exists — and pushed
     // rather than returned, because the two ways in here differ: /load_session
@@ -524,6 +600,11 @@ function reconcileChannelList(ribbit, live, targetList, { create, remove, onMatc
         if (data.sends) reconcileSends(ribbit, channel, data.sends, opts);
         scheduleAt(ribbit, opts.startTime, () => {
             channel.automation = rebuildAutomation(channel, data.automation);
+            // Deferred to the boundary with the structural changes rather
+            // than ramped with the values: mute is already its own 10ms fade
+            // (see RibbitChannel), and a *slow* mute is a fade, which is what
+            // the gain ramp beside it is for.
+            applyChannelState(channel, data);
         });
         onMatch?.(channel, data, opts);
     }
@@ -540,6 +621,7 @@ function reconcileChannelList(ribbit, live, targetList, { create, remove, onMatc
             reconcileProcessors(ribbit, channel, data.processors ?? [], instantOpts);
             if (data.sends) reconcileSends(ribbit, channel, data.sends, instantOpts);
             channel.automation = rebuildAutomation(channel, data.automation);
+            applyChannelState(channel, data);
             rampOrSet(ribbit, channel.params.gain, targetGain, opts);
             onMatch?.(channel, data, instantOpts);
         });
@@ -570,6 +652,26 @@ function reconcileModulators(ribbit, targetList, opts) {
             modulator.automation = rebuildAutomation(modulator, data.automation);
         });
     }
+};
+
+// Groups hold no audio, so there is no fade choreography here and no reason
+// to stagger anything: the whole membership picture is swapped at startTime.
+// Matched by name, like channels and modulators. A group whose members were
+// edited live and then /recall'd goes back to the saved membership, which is
+// the same reading of "restore this state" everything else here takes.
+function reconcileGroups(ribbit, targetList, { startTime }) {
+    scheduleAt(ribbit, startTime, () => {
+        const targetByName = new Map(targetList.map((data) => [data.name, data]));
+        for (const group of [...ribbit.groups]) {
+            const data = targetByName.get(group.name);
+            if (data) group.setMembers(data.members ?? []);
+            else ribbit.removeGroup(group);
+        }
+        for (const data of targetList) {
+            if (ribbit.groups.some((g) => g.name === data.name)) continue;
+            ribbit.createGroup({ name: data.name, members: data.members ?? [] });
+        }
+    });
 };
 
 // Patches don't have their own name, just a (sourceName, destName) pair —
@@ -686,4 +788,5 @@ export function applySnapshot(ribbit, snapshot, { startTime, durationSeconds = 0
 
     reconcileModulators(ribbit, snapshot.modulators ?? [], opts);
     reconcilePatches(ribbit, snapshot.patches ?? [], opts);
+    reconcileGroups(ribbit, snapshot.groups ?? [], opts);
 };

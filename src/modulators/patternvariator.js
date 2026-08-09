@@ -302,7 +302,15 @@ export class RibbitPatternVariator extends RibbitModulator {
         // A missing or "random" pack/pattern is resolved to a concrete one
         // here and stored, so getOptions() never reports a word that would
         // load as something else next time.
-        const random = mulberry32(this.seed);
+        //
+        // Drawn with Math.random rather than this instance's seeded PRNG, for
+        // the same reason percsampler's kit roll is: the *result* is what gets
+        // stored and saved, so there is nothing left to reproduce — and a
+        // seeded draw made `pattern=random` a no-op when typed twice in a row,
+        // since an unchanged seed picked the same file every time. The seed
+        // still owns the variation (see _regenerate), which is the part that
+        // has to survive a reload.
+        const random = Math.random;
         if (this.pack && this.pack !== "random" && !packs.includes(this.pack)) {
             throw new Error(`unknown pack "${this.pack}" — expected ${packs.join(", ")}`);
         }

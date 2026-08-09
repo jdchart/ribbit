@@ -38,6 +38,11 @@ export { RibbitSynth } from "./synth.js";
 export { RibbitProcessor } from "./processor.js";
 export { RibbitModulator } from "./modulator.js";
 export { RibbitPatch, RibbitEventPatch } from "./patch.js";
+export { RibbitGroup } from "./group.js";
+// Audio capture. The recorder is reached as `engine.recorder` in practice —
+// these are exported for a host that wants to build its own transport (the
+// mode/bit-depth lists to render a toggle from) or to encode audio of its own.
+export { RibbitRecorder, RECORDER_MODES, RECORDER_BIT_DEPTHS, encodeWAV } from "./recorder.js";
 export { positionToGain, gainToPosition } from "./taper.js";
 export { mulberry32, randomSeed } from "./random.js";
 export { parsePattern, cellAt, fetchPattern, fetchPatternManifest } from "./pattern.js";
@@ -67,6 +72,8 @@ export { RibbitDelay } from "./processors/delay.js";
 export { RibbitCompressor } from "./processors/compressor.js";
 export { RibbitSaturator, SATURATOR_CHARACTERS } from "./processors/saturator.js";
 export { RibbitTilt } from "./processors/tilt.js";
+export { RibbitSVF } from "./processors/svf.js";
+export { RibbitComb } from "./processors/comb.js";
 export { RibbitLimiter } from "./processors/limiter.js";
 export { RibbitGoodenizer } from "./processors/goodenizer.js";
 export { RibbitLFO } from "./modulators/lfo.js";
@@ -76,3 +83,4 @@ export { RibbitMarkovPercs } from "./modulators/markovpercs.js";
 export { RibbitEuclidPercs } from "./modulators/euclidpercs.js";
 export { RibbitPatternVariator } from "./modulators/patternvariator.js";
 export { RibbitChorale } from "./modulators/chorale.js";
+export { RibbitRandomGestures } from "./modulators/randomgestures.js";

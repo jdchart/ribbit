@@ -7,7 +7,7 @@
 ```
 
 - `name` is either a top-level command, or the name of an existing track, the
-  master channel, a processor, or a modulator.
+  master channel, a bus, a processor, a modulator, or a group.
 - A bare `key` with no `=` is a boolean flag: `/reverb help` sets `params.help = true`.
   Every track, bus, master, processor, and modulator understands `help` this
   way — see [Getting help](#getting-help) below.
@@ -47,14 +47,14 @@
 
 ## Getting help
 
-Every track, bus, master, processor, and modulator responds to three
+Every track, bus, master, processor, modulator, and group responds to three
 "introspect, don't change anything" forms:
 
 | Form | Shows |
 |---|---|
 | `/name` (no params) | A one-line summary: current param values, and (for a channel) its inserts/sends/synth. |
 | `/name help` | The full reference: every param with its current value and range, plus every command that object accepts, each with a short usage note. |
-| `/tracks`, `/buses`, `/modulators` | The one-line summary for every object of that kind, one per line. |
+| `/tracks`, `/buses`, `/modulators`, `/groups` | The one-line summary for every object of that kind, one per line. |
 
 ```
 /track_1
@@ -74,6 +74,8 @@ commands:
   <param>.r=true|false             include/exclude one param from that bulk random (saved with the session)
   at=beat|cycle                    defer ANY command on this line — a set, a ramp, or a discrete change like start/stop/synth=/an option — to the next beat/loop boundary instead of firing now
   synth=<type>                     swap this track's synth (oscsynth, sampler, percsampler, karplus, granular, tapepad, chaossynth, czsynth)
+  mute / unmute                    silence this channel (and its sends) without moving the fader; mute=false also unmutes
+  solo / unsolo                    hear only the soloed channels — anything sending into one, or fed by one, stays audible too
   add_event beat= pitch=|degree= velocity= duration=   append a note event (all optional except beat)
   ...
 ```
@@ -107,12 +109,19 @@ below).
 | `/patch id=<id> [depth=]` | Adjusts an existing patch's depth (rampable, `at=` deferrable). With no `depth=`, reports the patch's summary. |
 | `/unpatch id=<id>` | Removes a patch. Takes `at=` (`/unpatch id=x1 at=cycle`). |
 | `/patches` | Lists every active patch, e.g. `x1: lfo1 -> reverb.wet (depth 0.20)` — or, for an event-generating modulator's patch into a synth, `x2: rand1 -> lead.notes (generated notes)` (see [Event-generating modulators](#event-generating-modulators-patching-notes-into-a-synth)). |
-| `/save name=<state>` (or `/save <state>`) | Captures everything live (clock, harmony, master/buses/tracks and their inserts/sends, modulators, patches) under `<state>`, held in memory — see [Session and states](#session-and-states). A bare leading value is shorthand for `name=`: `/save 1` and `/save name=1` are equivalent (works for non-numeric names too, e.g. `/save verse1`). |
+| `/add_group [name=] [members=a,b,c]` | Creates a group — a name that stands for several other names, so one command can drive all of them (see [Groups](#groups)). `members` is a comma-separated list (no spaces) of tracks, buses, `master`, processors, modulators, or other groups; every name must already exist. **Refuses `at=`** — see [The one exception](#the-one-exception-creating-things). |
+| `/groups` | Lists every group and its members, e.g. `drums — 3 members: kick, snare, hats`. |
+| `/save name=<state>` (or `/save <state>`) | Captures everything live (clock, harmony, master/buses/tracks and their inserts/sends and mute/solo state, modulators, patches, groups) under `<state>`, held in memory — see [Session and states](#session-and-states). A bare leading value is shorthand for `name=`: `/save 1` and `/save name=1` are equivalent (works for non-numeric names too, e.g. `/save verse1`). |
 | `/recall name=<state> [<duration>] [at=beat\|cycle]` (or `/recall <state> ...`) | Reconciles the live session toward a saved state — matching objects ramp in place, appearing/disappearing ones fade in/out, rather than a hard cut. A trailing duration on `name=` ramps the whole change over that long, e.g. `name=verse1 3` (3s) or `name=verse1 4b` (4 beats) — same convention as any other ramp (see [Ramps](#ramps)); with none, every change still happens (deferred to `at=` if given), just as an instant jump. Same bare-leading-value shorthand as `/save`: `/recall 1 4b at=cycle` is `/recall name=1 4b at=cycle`. |
 | `/remove_state name=<state>` | Deletes a saved state. |
 | `/states` | Lists every saved state's name. |
 | `/save_session` (alias: `/save_json`) | Downloads the whole live session, including every saved state, as a `.json` file. The mixer's Transport bar has a "Save JSON" button that runs this same command (see [The mixer](../user/tutorial.md#the-mixer)). |
 | `/load_session` (alias: `/load_json`) | Opens a file picker and hard-rebuilds the session (tearing down everything live first) from the chosen `.json` file. The Transport bar's "Load JSON" button runs this same command. |
+| `/record [mode=] [bits=] [max_minutes=]` | Starts recording the session's audio output. Takes `at=beat`/`at=cycle`, which is the point — `/record at=cycle` starts the take on the downbeat. Any settings given are applied first (same keys as `/recording` below). See [Recording](#recording). |
+| `/stop_record` | Stops recording. Takes `at=` too, so `/record at=cycle` … `/stop_record at=cycle` captures a whole number of cycles. |
+| `/save_record` | Encodes the take and downloads it — one `.wav` in `stereo` mode, a `.zip` of one `.wav` per channel in `multitrack`. |
+| `/clear_record` | Discards the take and frees the memory it was holding. |
+| `/recording [mode=] [bits=] [max_minutes=]` | With no params, reports the recorder's state (`idle`, or the take's length/channel count/memory). `mode=stereo\|multitrack` picks what gets tapped, `bits=32\|16` the WAV sample format, `max_minutes=<n>` the safety stop. `/record help` prints the whole reference. |
 
 ## Channel commands (`/master`, or any track/bus by name)
 
@@ -125,7 +134,10 @@ track_1 — gain=0.80 pan=0.00 inserts=[p1:reverb] sends=[s1:master(1.00)] synth
 ```
 
 `(stopped)` only appears if the track's synth has been paused via `stop`. A
-bus has the same shape, minus the trailing `synth=...` (it has none).
+bus has the same shape, minus the trailing `synth=...` (it has none). A
+bracketed state after the name — `track_1 [muted]`, `[solo]`, or
+`[silenced by solo]` — appears when one applies; the last of those is the
+answer to "why is this track quiet when its fader is up".
 
 | Param | Effect |
 |---|---|
@@ -141,10 +153,12 @@ bus has the same shape, minus the trailing `synth=...` (it has none).
 | `automate=<param> to=<val> [from=] [beat=] [duration=] [curve=] [once]` | Adds **loop-position automation** on `gain` or `pan` — a ramp anchored to a beat *within the loop*, replayed every pass (unlike a one-off console ramp like `gain=0 3`, which fires once from "now"). `beat` (default 0) and `duration` (default 1) are in beats; `from` defaults to the param's current value; `curve` is `linear` (default), `exponential`, or `target`; the bare flag `once` makes it fire a single time ever instead of every loop. See [Loop automation](#loop-automation) below. |
 | `automations` | Lists this channel's automation events with indices (the handle `remove_automation=` takes). |
 | `remove_automation=<n>` / `clear_automation` | Removes one automation event by index / removes them all. |
+| `mute` / `unmute` | Silences (or restores) this channel without touching the fader — the position stays where it is, an in-flight `gain` ramp keeps running underneath, and unmuting returns exactly where you were. It also takes the channel's **sends** with it, so a muted track feeds a reverb bus nothing. `mute=false` is the same as `unmute`. Deferrable: `/kick mute at=cycle`. Valid on master and buses too. |
+| `solo` / `unsolo` | Hears only the soloed channels. Anything that can *reach* a soloed channel through sends, or be reached from one, stays audible too — so soloing a track keeps its reverb bus working, and soloing that bus keeps the tracks feeding it playing. Several channels can be soloed at once. `solo=false` is `unsolo`. Refused on master (everything already goes through it). |
 | `start` | Resumes the track's own synth (its events/automation resume being scheduled). Not valid on master or a bus. |
 | `stop` | Pauses the track's own synth without touching routing or other tracks. Not valid on master or a bus. |
 | `synth=<type>` | Swaps the track's synth to a new instance of `<type>` (see [objects.md](objects.md)), discarding the old one's state (including its events — re-`add_event` afterward). Not valid on master or a bus (neither has a synth). Only the type is passed through this command — extra constructor options currently require creating the track fresh via `/add_track`. |
-| `add_processor=<type>` | Creates a new processor of `<type>` and appends it to this channel's insert chain. Returns its assigned name and id, e.g. `added reverb (p1)`. Types: `reverb`, `delay`, `compressor`, `saturator`, `tilt`, `limiter`, `goodenizer` (see [objects.md](objects.md)). The processor is named after its type — a second one of the same type becomes e.g. `compressor_2` — and `add_processor=` takes no name of its own. |
+| `add_processor=<type>` | Creates a new processor of `<type>` and appends it to this channel's insert chain. Returns its assigned name and id, e.g. `added reverb (p1)`. Types: `reverb`, `delay`, `compressor`, `saturator`, `tilt`, `svf`, `comb`, `limiter`, `goodenizer` (see [objects.md](objects.md)). The processor is named after its type — a second one of the same type becomes e.g. `compressor_2` — and `add_processor=` takes no name of its own. |
 | `remove_processor=<id>` | Removes the processor with that id from this channel's chain (and destroys it, along with any patch touching it). |
 | `out=<name>` | Replaces **every** current send with a single one to `<name>` (a track, bus, or `master`), at gain 1 — see [Buses and sends](#buses-and-sends). Not available on master: its one send to the actual speakers has no addressable name, so nothing typed at the console could ever wire it back (`remove_send=` refuses that same send for the same reason — `add_send=` on master stays allowed). |
 | `add_send=<name> [send_gain=<0-1>]` | Adds one more send to `<name>` without disturbing existing ones (`send_gain` defaults to `1`). Returns the new send's id, e.g. `added send s2 -> bus1 (gain 0.40)`. |
@@ -244,15 +258,60 @@ A bus is otherwise a normal channel — it can hold processors
 removed (`remove_self`), which also cleans up every other channel's send
 that was feeding into it, the same way removing a patch's endpoint does.
 
+## Groups
+
+A **group** is a name that stands for several other names. Everything you
+type at it is run against each member, exactly as if you had typed it at each
+of them in turn:
+
+```
+/add_group name=drums members=kick,snare,hats
+/drums gain=0.4              set all three faders
+/drums gain=0 4b at=cycle    fade all three out together, on the next loop boundary
+/drums mute                  drop the whole kit
+/drums random                roll every member's params
+```
+
+Members can be tracks, buses, `master`, processors, modulators, or other
+groups (`/add_group name=all members=drums,pads`) — anything addressable.
+`members=` takes a comma-separated list with **no spaces**, and every name has
+to exist already.
+
+A group is **not** a bus. A bus sums audio: routing four tracks into one gives
+you one fader, one insert chain, one pan, and changes what you hear. A group
+changes nothing about the signal path — it just addresses several things at
+once, and each keeps its own everything. The two work together: a group of the
+four drum tracks that already send to a drum bus is the normal arrangement.
+
+| Command | Effect |
+|---|---|
+| `members=a,b,c` | Replaces the membership. |
+| `add_member=<name>` / `remove_member=<name>` | Adds or drops one member. |
+| `remove_self` | Deletes the group. **Its members are untouched** — to delete those, address them individually. |
+| `help` | The group's own reference, plus its current membership. |
+
+Everything else on the line is forwarded, `at=` included, so all the members
+land on the same boundary. A key a given member doesn't understand is reported
+by that member (`/drums cutoff=800` on a kit where only one track's synth has
+a `cutoff` sets that one and reports `unknown param` for the rest) — which
+makes a mixed group perfectly usable, just noisier.
+
+Members are stored as **names**, looked up fresh each time. So a group written
+before its members exist is fine, a member that gets torn down and rebuilt by
+`/recall` rejoins automatically, and one that's gone for good shows as
+`kick(missing)` in the listing rather than quietly vanishing.
+
 ## Modulators and patches
 
 A **modulator** is a standalone control source — created and addressed just
-like a processor, but it never sits in any channel's signal chain. Seven
+like a processor, but it never sits in any channel's signal chain. Eight
 types ship: `lfo` (a low-frequency oscillator, the default), `cv` (a held
-value you set/ramp yourself), and five that generate notes rather than a
+value you set/ramp yourself), five that generate notes rather than a
 signal — `randomnotes`, `markovpercs`, `euclidpercs`, `patternvariator` and
 `chorale` (see
-[below](#event-generating-modulators-patching-notes-into-a-synth)).
+[below](#event-generating-modulators-patching-notes-into-a-synth)) — and
+`randomgestures`, which is patched **nowhere**: it roams the session on its
+own and glides random parameters (see [objects.md](objects.md)).
 Full reference: [objects.md](objects.md#modulators-type-on-add_modulator).
 A modulator only matters once you **patch** it somewhere:
 
@@ -357,8 +416,9 @@ unaffected either way.
 ## Session and states
 
 The whole live session — clock/harmony, master/every bus/every track (each
-with its own gain/pan/inserts/sends/loop-automation), every modulator, and
-every patch — can be captured, restored, saved to a file, and loaded back.
+with its own gain/pan/mute/solo/inserts/sends/loop-automation), every
+modulator, every patch, and every group — can be captured, restored, saved to
+a file, and loaded back.
 A track's synth round-trips too: its type, params, options (waveform, ...),
 and events all come back, and `/recall` swaps the synth back if you changed
 its type after saving.
@@ -393,6 +453,61 @@ state currently saved, so loading one back also restores what you could
 is torn down first and rebuilt fresh from the file, since loading a whole
 session is a cold-start operation, not something you'd want to hear glide
 into place.
+
+## Recording
+
+A session file describes how to *make* the sound; a recording is the sound
+itself. `/record` captures the engine's audio output to a WAV you can drop
+into a DAW or send to someone.
+
+```
+/record at=cycle              start on the next downbeat
+/recording                    recording 12.4s across 1 channel (2.1MB) mode=stereo bits=32 max_minutes=5
+/stop_record at=cycle         stop on a boundary, so the take is whole cycles
+/save_record                  saved ribbit-2026-08-07_15-42-03.wav (12.5s, 4.3MB)
+```
+
+**Two modes.** `mode=stereo` (the default) taps master only and downloads one
+`.wav` — what you heard. `mode=multitrack` taps *every track, every bus, and
+master* as its own stereo file, all downloaded together in one `.zip`
+(`01-kick.wav`, `02-hats.wav`, …, numbered so they sort into mixer order):
+
+```
+/recording mode=multitrack
+/record
+/stop_record
+/save_record                  saved ribbit-2026-08-07_15-42-04.zip — 4 files, 24.0s (5.6MB)
+```
+
+The mode can't be changed mid-take — the layout decides how many files the
+take has, so `/stop_record` first.
+
+**Two settings beyond the mode.** `bits=32` (the default) writes 32-bit float
+WAV: lossless, and unbothered by a master that runs past 0dBFS, which a live
+session regularly does. `bits=16` writes ordinary PCM — half the size and
+playable by anything, at the cost of hard-clipping anything over full scale.
+`max_minutes=<n>` (default 5) is a safety stop: a take is raw audio held in
+memory, and a forgotten recording will eat the tab. `/recording` reports how
+much it is currently holding for that reason, and hitting the limit stops the
+recording rather than the browser.
+
+Four things worth knowing:
+
+- **Taps are post-fader, post-pan, post-mute.** A channel records exactly what
+  it is contributing to the mix, so a muted or soloed-out track records
+  silence. That's the honest answer, not a bug — it contributed silence.
+- **The channel list is fixed when recording starts.** A track added halfway
+  through a multitrack take isn't in it.
+- **Nothing is captured while the engine is stopped.** A suspended
+  `AudioContext` renders no audio at all, so `/stop` mid-take doesn't leave a
+  gap of silence in the file — it leaves nothing, and the take's two halves
+  are butt-joined. `/recording` says so while the engine is stopped.
+- **A take is not part of the session.** `/save_session` doesn't carry it and
+  `/load_session` doesn't clear it — save the two separately.
+
+`/record help` prints all of the above as a reference. The mixer's Transport
+bar has the same controls as buttons (see
+[The mixer](tutorial.md#the-mixer)).
 
 ## Ramps
 
@@ -637,14 +752,12 @@ as it does over a ramp).
 
 Loop automation is captured by `/save`/`/recall` and session files (a
 `once` event that already fired will fire once more after a recall/load —
-"restore this state" restores the fade-in too). One caveat: automation on
-a *multi-node* param (`delay`'s `time`/`feedback`) only animates the
-primary node, same pre-existing limitation ramps have.
+"restore this state" restores the fade-in too).
 
 ## Names
 
-Tracks, buses, the master channel, processors, and modulators share one flat
-command namespace — every object is addressable as `/name`, so no two
+Tracks, buses, the master channel, processors, modulators, and groups share
+one flat command namespace — every object is addressable as `/name`, so no two
 objects of *any* kind can share a name. Creation enforces this: a requested
 name that's already taken (by any object, of any kind) is de-duplicated with
 a numeric suffix (`clock_2`, `t1_2`, ...), exactly like the default names

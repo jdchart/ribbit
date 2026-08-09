@@ -142,6 +142,52 @@ Every track/bus/master/processor/modulator also answers `help` for the full
 command and param reference, not just the one-line summary above — see
 [Getting help](commands.md#getting-help).
 
+## Mute, solo, and groups
+
+Three things for playing a session rather than building one.
+
+**Mute** takes a channel out without touching its fader, so putting it back
+lands exactly where you were:
+
+```
+/hats mute
+/hats unmute
+/hats mute at=cycle       drop out on the next loop boundary
+```
+
+**Solo** does the opposite — everything else drops out:
+
+```
+/lead solo
+/lead unsolo
+```
+
+Solo is smarter than "mute everything else": anything that feeds a soloed
+channel, or is fed by one, keeps playing. Solo a track and its reverb bus keeps
+working; solo the reverb bus and the tracks feeding it keep playing. You can
+solo several channels at once. Both states show up in `/tracks` — a track
+that's quiet because something *else* is soloed says `[silenced by solo]`,
+which saves a lot of staring at a fader that's up. Both are also the **M** and
+**S** buttons on each mixer strip.
+
+**Groups** save you typing the same thing at four objects. A group is just a
+name standing for several other names:
+
+```
+/add_group name=kit members=kick,snare,hats
+/kit gain=0.4
+/kit gain=0 4b at=cycle     fade the whole kit out together, on the boundary
+/kit mute
+/kit random                 roll every member's params at once
+```
+
+Anything you type at the group is run at each member, so it works with every
+command in this tutorial — there's no separate list of "group commands". A
+group is *not* a bus: it doesn't sum anything, doesn't have a fader, and
+doesn't change the signal path at all. The two go together — group the four
+drum tracks that already send to a drum bus, and you can address them either
+way depending on what you mean.
+
 ## The console
 
 Beyond just running whatever you type, the console (the left-hand pane)
@@ -168,7 +214,9 @@ gives you three shortcuts:
   choices (`synth=`, `type=`, `at=`, `add_processor=`, an existing
   track/bus/processor/modulator name for `out=`/`add_send=`/`source=`/
   `dest=`, an existing state/patch/send id, ...) — an open-ended value (a
-  number, a name you're inventing) is left alone. Typing a key's `=` with
+  number, a name you're inventing) is left alone. A value you've typed *in
+  full* is never completed past, either: with an option whose choices include
+  both `1` and `1+1`, typing `1` and pressing Enter runs `1`. Typing a key's `=` with
   **nothing** after it yet shows no suggestion on purpose — narrow it to at
   least one character first, so pressing Enter right after `type=` doesn't
   silently accept whichever candidate happens to be listed first. If nothing
@@ -329,6 +377,31 @@ strikethrough when off), or remove it entirely:
 ```
 /drums remove_processor=p2
 ```
+
+Two of the processors are less "set it and leave it" than the rest, and are
+worth meeting early because they're the ones you *play*. `svf` is a filter —
+one cutoff, one resonance, and a switch for which shape comes out:
+
+```
+/drums add_processor=svf
+/svf mode=lowpass cutoff=400
+/svf cutoff=8000 8b            open it over eight beats
+/svf mode=highpass at=cycle    switch shape on the next loop boundary
+```
+
+`comb` is the same signal delayed by a few milliseconds and added back to
+itself, which reads as tone rather than as an echo — a ringing resonance in
+`mode=feedback`, a flanger in `mode=feedforward`:
+
+```
+/drums add_processor=comb
+/comb mode=feedforward time=0.004 feedback=-0.8
+```
+
+Full parameter tables for both are in [objects.md](objects.md#svf--ribbitsvf);
+the one thing to know up front is that `mode=feedback` can't ring above about
+344Hz (Web Audio won't make a feedback loop shorter than one processing block),
+and `/comb` tells you when you've asked for less.
 
 ## Rolling the dice
 
@@ -567,7 +640,32 @@ waveform and no rate — just a held `value` you set or ramp yourself:
 
 That last line sweeps *both* destinations from one command, each scaled by
 its own patch depth — a single control moving several things at once, which
-is what patch cables are for. See
+is what patch cables are for.
+
+And one modulator takes no patch at all. `randomgestures` roams the session
+by itself, picking a parameter every so often and gliding it somewhere new:
+
+```
+/add_modulator type=randomgestures name=drift
+/drift gesture_beats=8 glide=6 depth=0.15
+```
+
+That's a hand slowly moving controls while you work on something else. It only
+touches params the bulk `random` command would touch, so faders are safe and
+`/lead cutoff.r=false` puts one parameter off limits. Point it somewhere
+narrower with `scope=`, `targets=` (a group name works, and is the tidy way to
+do it) or `params=`, and ask it what it's up to:
+
+```
+/drift targets=kit params=dynamics
+/drift
+drift: ... [3 params in range · 12 gestures · last: hats.dynamics 0.100 -> 0.087 over 6b]
+```
+
+`0 params in range` means it has nothing to do — usually a `params=` name that
+nothing in `targets=` actually has (`params=cutoff` aimed at a drum kit).
+
+It's seeded, so `/stop` `/start` replays the same take. See
 [commands.md](commands.md#modulators-and-patches) for the full reference, and
 [objects.md](objects.md#modulators-type-on-add_modulator) for every modulator
 type.
@@ -1245,10 +1343,22 @@ patches.
 At the top, the **Transport** bar has the engine on/off button, a pulsing
 clock LED with the current beat/bpm readout — the LED blinks each beat, and
 the thin ring around it sweeps once per loop, so both "where in the beat"
-and "where in the cycle" read at a glance — and two buttons on the
-right — **Save JSON**/**Load JSON** — that run the exact same
-`/save_json`/`/load_json` commands you could type yourself (see
+and "where in the cycle" read at a glance — then the **recorder** controls,
+and two buttons on the right — **Save JSON**/**Load JSON** — that run the exact
+same `/save_json`/`/load_json` commands you could type yourself (see
 [Saving and loading](#saving-and-loading) below), just one click instead.
+
+The recorder group is a blinking **REC** button, a readout showing either the
+running length and channel count or the finished take's length, an **ST**/**MT**
+toggle for stereo vs. multitrack (locked while recording, since the mode
+decides how many files a take has), and **Save**/**×** for downloading or
+discarding the take. Every one of them runs the corresponding console command
+(`/record`, `/stop_record`, `/recording mode=…`, `/save_record`,
+`/clear_record`), so what happened shows up in the scrollback rather than
+succeeding silently — which matters here, because "saved
+ribbit-….zip — 4 files, 24.0s" is the only confirmation you get that a
+download actually contained something. See
+[Recording what you played](#recording-what-you-played).
 
 Below that, **Tracks**, **Buses**, and **Master** sit side by side in one
 row — Tracks grows to fill the available width and scrolls its own strips
@@ -1269,7 +1379,10 @@ and a remove button.
 
 Each track/bus strip mirrors and controls the same state the console does: a
 vertical fader (gain, with a level meter next to it), a rotary pan dial
-(click-drag vertically), and the insert-chain buttons below that (click to
+(click-drag vertically), **M** and **S** buttons for mute and solo (see
+[Mute, solo, and groups](#mute-solo-and-groups) — M fills red when engaged, S
+fills when soloed and shows as an outline on a channel something *else* is
+silencing; master has no S), and the insert-chain buttons below that (click to
 toggle bypass — active inserts render in the accent color, bypassed ones dim
 and struck-through; shift+click instead pastes that insert's id into the
 console — see [The console](#the-console)). A track strip also shows its
@@ -1380,6 +1493,47 @@ than any one snapshot. Every session shipped with the app has one — open any
 of them from the homepage to see it.
 
 See [commands.md](commands.md#session-and-states) for the full reference.
+
+## Recording what you played
+
+A session file says how to *make* the sound. Once you've made something worth
+keeping, `/record` captures the sound itself:
+
+```
+/record at=cycle
+... play ...
+/stop_record at=cycle
+/save_record
+```
+
+Both ends take `at=`, which is the whole reason to type them rather than
+clicking: starting and stopping on cycle boundaries gives you a take that's a
+whole number of loops long, so it loops cleanly in whatever you drop it into.
+`/save_record` downloads a 32-bit float `.wav`.
+
+That records master — what you heard. The other mode records the *parts*:
+
+```
+/recording mode=multitrack
+/record
+```
+
+Now every track, every bus, and master is captured as its own stereo file,
+downloaded together as one `.zip` with the files numbered in mixer order. That
+is a stem export: open it in a DAW and you have your session's channels
+separately, to remix, edit, or mix by hand. Set the mode before you start —
+it can't change mid-take.
+
+`/recording` on its own reports where things stand, including how much memory
+the take is holding, which is worth watching: a take is raw audio, and a
+multitrack one grows several times faster than a stereo one. There's a safety
+stop at five minutes (`/recording max_minutes=10` to raise it) and
+`/clear_record` to throw a take away once you've saved it.
+
+Taps are post-fader, so a muted track records silence, and nothing at all is
+captured while the engine is stopped. The mixer's Transport bar has all of
+this as buttons — see [The mixer](#the-mixer). Full reference:
+[commands.md](commands.md#recording).
 
 ## Cleaning up
 

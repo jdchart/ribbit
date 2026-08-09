@@ -1,21 +1,47 @@
 import { RibbitParam } from "./param.js";
 import { positionToGain, gainToPosition } from "./taper.js";
 
+// How long mute/unmute takes. Long enough to not click, short enough to read
+// as instant — a mute you can hear fading is a fade, not a mute.
+const MUTE_FADE_SECONDS = 0.01;
+
 // Base class for anything with a fader, pan, and an insert chain of
 // processors: the master bus and every RibbitTrack. Owns the actual Web Audio
 // nodes for that signal path and keeps them wired correctly as processors are
 // added, removed, or bypassed. Not itself a sound source — RibbitTrack adds a
 // `.source` synth on top of this.
 export class RibbitChannel {
-    constructor(audioContext, { name = "channel" } = {}) {
+    constructor(audioContext, { name = "channel", engine = null } = {}) {
         this.name = name;
+        // The owning Ribbit, when there is one — needed only by setSoloed,
+        // since solo is a whole-session state and one channel can't compute
+        // it alone (see Ribbit.updateSolo). Null for a channel built
+        // standalone, which then simply has no solo.
+        this.engine = engine;
 
         this.audioContext = audioContext;
         this.input = audioContext.createGain();
         this.panner = audioContext.createStereoPanner();
+        // Mute lives on its own node between the panner and the fader, so
+        // muting is not "set the gain to 0": the fader keeps its position
+        // (and its value in a saved session), an in-flight gain ramp keeps
+        // running underneath, and unmuting returns to exactly where the
+        // channel was. Being upstream of gainNode also means it takes the
+        // sends with it — a muted channel feeds a reverb bus nothing, which
+        // is what mute means on a desk.
+        this.muteGain = audioContext.createGain();
         this.gainNode = audioContext.createGain();
 
-        this.panner.connect(this.gainNode);
+        // Two independent reasons this channel might be silent: the user
+        // muted it, or something else is soloed. Kept apart so that
+        // un-soloing restores a channel the user had muted by hand to muted,
+        // not to audible.
+        this.muted = false;
+        this.soloed = false;
+        this._soloSilenced = false;
+
+        this.panner.connect(this.muteGain);
+        this.muteGain.connect(this.gainNode);
 
         this.processors = [];
         this.automation = [];
@@ -69,6 +95,50 @@ export class RibbitChannel {
         return event;
     };
 
+    // Mute/solo. Both are plain booleans plus one recomputation — the audio
+    // side is entirely _applyAudible below, so there is only ever one place
+    // that decides whether this channel is passing signal.
+    setMuted(muted) {
+        this.muted = !!muted;
+        this._applyAudible();
+        return this.muted;
+    };
+
+    // Solo can't be applied locally: turning it on has to silence every other
+    // channel, and turning it off has to un-silence them (unless something
+    // else is still soloed). So the flag is set here and the whole session is
+    // re-derived by the engine — including this channel, via _setSoloSilenced.
+    setSoloed(soloed) {
+        this.soloed = !!soloed;
+        if (this.engine) this.engine.updateSolo();
+        else this._applyAudible();
+        return this.soloed;
+    };
+
+    // Called only by Ribbit.updateSolo: "solo elsewhere is silencing you".
+    _setSoloSilenced(silenced) {
+        if (this._soloSilenced === silenced) return;
+        this._soloSilenced = silenced;
+        this._applyAudible();
+    };
+
+    // Whether this channel is currently passing signal at all — audible
+    // unless muted by hand or silenced by someone else's solo.
+    get audible() {
+        return !this.muted && !this._soloSilenced;
+    };
+
+    // A short ramp rather than a jump: a gain step straight to or from zero
+    // on a signal that isn't at a zero crossing is an audible click, and mute
+    // is a live-performance control that gets hit mid-note by definition.
+    _applyAudible() {
+        const gain = this.muteGain.gain;
+        const now = this.audioContext.currentTime;
+        gain.cancelScheduledValues(now);
+        gain.setValueAtTime(gain.value, now);
+        gain.linearRampToValueAtTime(this.audible ? 1 : 0, now + MUTE_FADE_SECONDS);
+    };
+
     // Adds one more feed from this channel's post-fader signal to
     // `destination` (another channel, e.g. a bus/master, or a raw AudioNode),
     // through its own gain — independent of every other send this channel
@@ -94,6 +164,11 @@ export class RibbitChannel {
             _node: sendGain,
         };
         this.sends.push(send);
+        // Solo's audible set is derived from the sends graph (see
+        // Ribbit.updateSolo), so re-routing while a solo is live has to
+        // re-derive it — otherwise a track moved onto a soloed bus stays
+        // silent, or one moved off it stays audible.
+        this.engine?.updateSolo();
         return send;
     };
 
@@ -103,6 +178,7 @@ export class RibbitChannel {
 
         const [removed] = this.sends.splice(index, 1);
         removed._node.disconnect();
+        this.engine?.updateSolo();
         return true;
     };
 

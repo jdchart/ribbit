@@ -91,7 +91,16 @@ command (case 1) is suggestible for free (`suggest` reads
 channel field (case 3) needs a manual addition to `commands.js`'s
 `CHANNEL_ACTION_KEYWORDS`/`PARAM_OBJECT_ACTION_KEYWORDS` — the same "new
 commands need a manual list update, params/types don't" split `help` has,
-just a second list.
+just a second list. Note also that neither the `/name` token nor a value ever
+completes past something the user has already typed in full, since the console
+submits ghost text on Enter: `lines=1` must not run as `lines=1+1`, and
+`/record` must not run as `/recording`. **A new command name that is a strict
+prefix of an existing one is therefore fine** — but only because of that
+guard; check it still holds if you touch `suggestCompletion`.
+
+Any new channel command works through **groups** with no extra work:
+`groupCommand` forwards every key it doesn't own to each member's handler, so
+there is no per-command list to extend.
 
 If a param genuinely shouldn't be rampable (like `/clock num_beats=` — a
 fractional, shifting loop length makes no sense), reject a ramp spec

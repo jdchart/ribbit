@@ -29,6 +29,8 @@ Ribbit                         top-level owner, one per page
 ├── processors: RibbitProcessor[]   flat registry of every processor anywhere
 ├── modulators: RibbitModulator[]   flat registry of every modulator (e.g. an lfo)
 ├── patches: RibbitPatch[]     every active "patch cable" (source.output → depth → destParam)
+├── groups: RibbitGroup[]      named sets of other objects' names; hold no audio (group.js)
+├── recorder: RibbitRecorder   audio capture to downloadable WAV; not a clock unit (recorder.js)
 └── states: {name: snapshot}      named snapshots captured by /save, applied by /recall (session.js)
 ```
 
@@ -59,6 +61,18 @@ running (this is exactly what `SessionPage.svelte`'s `onMount` cleanup is for).
   multi-send case. A **bus** is just a plain `RibbitChannel` with no `.source`,
   created via `/add_bus`, existing purely to be a send destination other
   channels route into.
+  **Mute and solo** are also here. `muteGain` sits between the panner and
+  `gainNode`, so muting is *not* "set gain to 0": the fader keeps its position
+  and its saved value, an in-flight gain ramp keeps running underneath, and
+  because the node is upstream of `gainNode` the sends go quiet with it.
+  `setMuted`/`setSoloed` set a flag and call `_applyAudible()`, the one place
+  that decides (`audible = !muted && !_soloSilenced`) and ramps `muteGain` over
+  10ms to avoid a click. Solo can't be applied locally, so `setSoloed` calls
+  `Ribbit.updateSolo()` through the channel's `engine` back-reference:
+  that walks the **sends graph** in both directions from every soloed channel
+  and silences only what can neither reach a soloed channel nor be reached from
+  one, which is what keeps a soloed track's reverb bus (and a soloed bus's
+  feeder tracks) alive. Master is never silenced by solo and refuses `solo`.
 - **`RibbitSynth`** (base of `RibbitOscSynth`, `RibbitSampler`,
   `RibbitPercSampler`, `RibbitKarplus`, `RibbitGranular`): produces sound. Has
   `events` (`RibbitEvent{beat,pitch,degree,velocity,duration}` — starts **empty**,
@@ -66,7 +80,8 @@ running (this is exactly what `SessionPage.svelte`'s `onMount` cleanup is for).
   clock calls per-event, an `output` GainNode, `harmony` (the shared context, see
   below), and an `active` flag (transport pause, distinct from routing bypass).
 - **`RibbitProcessor`** (base of `RibbitReverb`, `RibbitDelay`,
-  `RibbitCompressor`, `RibbitSaturator`, `RibbitTilt`, `RibbitLimiter`,
+  `RibbitCompressor`, `RibbitSaturator`, `RibbitTilt`, `RibbitSVF`,
+  `RibbitComb`, `RibbitLimiter`,
   `RibbitGoodenizer`): effects, continuously
   in a channel's signal chain (no per-event trigger). Has `input`/`output`
   GainNodes, `params` (`{name: RibbitParam}`) as its console-facing control
@@ -79,8 +94,11 @@ running (this is exactly what `SessionPage.svelte`'s `onMount` cleanup is for).
   from one `ConstantSourceNode` offset (once directly, once through a -1
   inverter, both summing onto the gains' intrinsic values) specifically so a
   *ramp* moves both sides — `RibbitParam`'s `onSet` only overrides the
-  instant-set path, which is the still-standing `RibbitDelay` limitation
-  below. `dispose()` is the duck-typed teardown a synth/modulator already
+  instant-set path. **No shipped param uses `onSet` any more**: `RibbitDelay`'s
+  `time`/`feedback` were the last two and are now constants summed into both
+  delay lines (with `stereoOffset` a second constant added to the R side, which
+  is why an offset needed a summed node rather than a scaler).
+  `dispose()` is the duck-typed teardown a synth/modulator already
   had, now called by `removeProcessor`/`Ribbit.dispose`: those
   `ConstantSourceNode`s are running sources reaching `audioContext
   .destination` through their own muted sinks, so unwiring a processor from
@@ -93,11 +111,12 @@ running (this is exactly what `SessionPage.svelte`'s `onMount` cleanup is for).
   is reimplemented, so `/glue threshold=` and a standalone `/compressor
   threshold=` cannot drift.
 - **`RibbitModulator`** (base of `RibbitLFO`, `RibbitCV`, `RibbitRandomNotes`,
-  `RibbitMarkovPercs`, `RibbitEuclidPercs`, `RibbitPatternVariator`): a
+  `RibbitMarkovPercs`, `RibbitEuclidPercs`, `RibbitPatternVariator`,
+  `RibbitChorale`, `RibbitRandomGestures`): a
   control source, structurally a processor's sibling (`params`, no per-event
   trigger) but never joins a channel's chain — it exists only to be patched
   somewhere.
-  Two shapes: a **continuous** modulator (`RibbitLFO`, `RibbitCV` — the
+  Three shapes: a **continuous** modulator (`RibbitLFO`, `RibbitCV` — the
   latter a `ConstantSourceNode` holding one unbounded, rampable/automatable
   `value` that never moves on its own, the minimal implementation of the base
   class) has a bipolar (`-1..1`-
@@ -112,6 +131,13 @@ running (this is exactly what `SessionPage.svelte`'s `onMount` cleanup is for).
   `RibbitPatch`), delivering generated `RibbitEvent`s straight to
   `destination.source.trigger(...)` — the same call a manually `add_event`'d
   note uses, running alongside it rather than replacing it.
+  The third shape is **session-acting** (`RibbitRandomGestures`, the only one):
+  it publishes nothing and is patched nowhere. It holds `engine` (injected by
+  `createModulator` the way `harmony` is injected into a synth), implements the
+  clock's `onSchedule(fromBeat, toBeat, secondsPerBeat, clock)` hook, and ramps
+  other objects' `AudioParam`s directly via `scheduleRamp`. Its eligible set is
+  exactly `RibbitParam.canRandomize` — the same params bulk `/<object> random`
+  touches — so `<param>.r=false` opts out of both at once.
   Two things live on the **base** class for every modulator, event-generating
   or not: `eventDestinations` (an empty array — `patch.js` and
   `Ribbit._createEventPatch` index into it directly, so a generator that forgot
@@ -185,9 +211,13 @@ running (this is exactly what `SessionPage.svelte`'s `onMount` cleanup is for).
   `bpm` can also be ramped over time (`rampBpm`, via a stepped timer rather than
   native `AudioParam` automation, since bpm isn't one). Treats synths, channels,
   processors, and modulators uniformly as "units" — anything with
-  `events`/`automation`/`trigger()`/`active`, plus two optional duck-typed
+  `events`/`automation`/`trigger()`/`active`, plus four optional duck-typed
   hooks: `generateEvents(fromBeat, toBeat)` (event-generating modulators, see
-  above), `onClockStart()` (called by `start()` — a (re)start rewinds
+  above), `onSchedule(fromBeat, toBeat, secondsPerBeat, clock)` (the same
+  absolute beat range, for a unit that acts on the session rather than
+  producing events — `RibbitRandomGestures` is the only consumer, and gets the
+  clock so it can turn a beat into a precise time to schedule a ramp at),
+  `onClockStart()` (called by `start()` — a (re)start rewinds
   absolute beats to 0, so a unit with its own absolute-beat state, e.g.
   `RibbitRandomNotes`' candidate cursor, resets it there), and
   `onCycle(cycleIndex)` (called when a new loop index is first scheduled — the
@@ -196,9 +226,10 @@ running (this is exactly what `SessionPage.svelte`'s `onMount` cleanup is for).
   which is what a regenerating unit needs; `cycleIndex` is monotonic but **not
   necessarily contiguous**, since a stall skips cycles rather than replaying
   them (regenerating for cycles nobody will hear is worse than landing on the
-  current one). **No shipped type consumes it yet** — all five generators index
-  `generateEvents` straight off the absolute beat, which sidesteps needing it,
-  and `patternvariator` deliberately regenerates only on reseed. Its own `_tick()` is wrapped in a
+  current one). **No shipped type consumes `onCycle` yet** — every generator
+  indexes `generateEvents` straight off the absolute beat, which sidesteps
+  needing it, and `patternvariator` deliberately regenerates only on reseed.
+  (`onSchedule`, added alongside it, does have a consumer.) Its own `_tick()` is wrapped in a
   try/catch so one bad event/param can only drop a single scheduling pass, never
   permanently kill the engine. Also exposes `nextBeatTime()`/`nextCycleTime()`,
   the anchors for deferred console ramps/instant sets (see below).
@@ -267,8 +298,8 @@ opening any source file, and update it whenever a type is added or removed.
 `src/ribbit.js`:
 ```js
 const SYNTH_TYPES = { oscsynth: RibbitOscSynth, sampler: RibbitSampler, percsampler: RibbitPercSampler, karplus: RibbitKarplus, granular: RibbitGranular, tapepad: RibbitTapePad, chaossynth: RibbitChaosSynth, czsynth: RibbitCZSynth };
-const PROCESSOR_TYPES = { reverb: RibbitReverb, delay: RibbitDelay, compressor: RibbitCompressor, saturator: RibbitSaturator, tilt: RibbitTilt, limiter: RibbitLimiter, goodenizer: RibbitGoodenizer };
-const MODULATOR_TYPES = { lfo: RibbitLFO, randomnotes: RibbitRandomNotes, cv: RibbitCV, markovpercs: RibbitMarkovPercs, euclidpercs: RibbitEuclidPercs, patternvariator: RibbitPatternVariator, chorale: RibbitChorale };
+const PROCESSOR_TYPES = { reverb: RibbitReverb, delay: RibbitDelay, compressor: RibbitCompressor, saturator: RibbitSaturator, tilt: RibbitTilt, svf: RibbitSVF, comb: RibbitComb, limiter: RibbitLimiter, goodenizer: RibbitGoodenizer };
+const MODULATOR_TYPES = { lfo: RibbitLFO, randomnotes: RibbitRandomNotes, cv: RibbitCV, markovpercs: RibbitMarkovPercs, euclidpercs: RibbitEuclidPercs, patternvariator: RibbitPatternVariator, chorale: RibbitChorale, randomgestures: RibbitRandomGestures };
 ```
 
 Non-base implementations live one folder down from `src/`, grouped by
@@ -372,7 +403,12 @@ their own) is the whole-session (de)serialization layer:
 - `snapshotSession(nllc)`/`sessionToJSON(nllc)` — a pure JSON snapshot:
   clock/harmony, master/every bus/every track (`params`/`processors`/`sends`;
   a track also its synth's `type`/`options`/`params`/`events`), every
-  modulator, every patch. Every rampable value comes from `RibbitParam.get()`.
+  modulator, every patch, and every group (`{name, members}`). A channel's
+  `muted`/`soloed` are written **only when true**, and `groups` is omitted
+  when empty, so a session that uses neither serializes byte-identically to
+  how it did before they existed. `_soloSilenced` is never written: it's
+  derived from everyone else's `soloed` and recomputed on load.
+  Every rampable value comes from `RibbitParam.get()`.
   Every constructible object (synth/processor/modulator) carries a `.type`
   string (set by `Ribbit.createSynth`/`createProcessor`/`createModulator` —
   the registry key that built it, since nothing else records that after
@@ -390,8 +426,14 @@ their own) is the whole-session (de)serialization layer:
   same `nllc.createTrack`/`createBus`/`addProcessor`/`addSend`/
   `createModulator`/`createPatch` the console itself uses. Order: buses/
   tracks (throwaway default send) → real sends once every destination name
-  exists → modulators → patches last (name-resolved against everything
-  already built). Backs `/load_session` and `/code-editor/<slug>`'s auto-load
+  exists → modulators → patches → groups last (both name-resolved against
+  everything already built). Any object whose requested name was already taken
+  (a duplicate in the file, or a reserved command name — `_uniqueName`
+  de-duplicates past both) is recorded in a **rename map**, and every later
+  reference to it — a send's destination, a patch's endpoints, a group's
+  members — is rewritten through it, with a `notify()` saying so. A `/save`d
+  state inside the same file is a whole nested snapshot reconciled by name at
+  `/recall` time and is *not* rewritten. Backs `/load_session` and `/code-editor/<slug>`'s auto-load
   (same call, just fed a `fetch()`ed static JSON instead of a picked file).
   Both this and `applySnapshot` first call `assertKnownTypes`, which checks
   every `.type` in the snapshot against the live registries and throws
@@ -450,12 +492,16 @@ already been told the change was scheduled.
 
 `/name key=val ...` where `name` is a top-level command (`start`, `stop`,
 `add_track`, `tracks`, `add_bus`, `buses`, `clock`, `harmony`,
-`add_modulator`, `modulators`, `patch`, `unpatch`, `patches`, `save`,
+`add_modulator`, `modulators`, `patch`, `unpatch`, `patches`, `add_group`,
+`groups`, `record`, `stop_record`, `save_record`, `clear_record`, `recording`,
+`save`,
 `recall`, `remove_state`, `states`, `save_session`, `load_session` — see
 [Sessions and states](#sessions-and-states-sessionjs-full-detail-docsdevarchitecturemd)
-above), `master`, a track's name, a bus's name, a processor's name, or a
-modulator's name. Channels (tracks,
-buses, master) support `gain=`, `pan=`, `add_event`, `events`,
+above), `master`, a track's name, a bus's name, a processor's name, a
+modulator's name, or a group's name. Channels (tracks,
+buses, master) support `gain=`, `pan=`, `mute`/`unmute`, `solo`/`unsolo`
+(master refuses `solo`; both also take an explicit value, so `mute=false` is
+`unmute`), `add_event`, `events`,
 `remove_event=`, `clear_events`, `start`,
 `stop`, `synth=`, `add_processor=`, `remove_processor=`, `remove_self`, plus
 routing: `out=<name>` (replace every current send with a single one to
@@ -471,7 +517,18 @@ own `params` and `options` keys through its name (`/lead waveform=square` —
 the synth isn't separately addressable, its channel is its surface).
 Processors and modulators support
 their own `params` and `options` keys plus `remove_self`, and `help`/no-args
-to introspect. Channels, processors, and modulators all take the
+to introspect.
+A **group** (`/add_group name=drums members=kick,snare,hats`) is a name
+standing for several other names. `groupCommand` consumes only `members=`,
+`add_member=`, `remove_member=`, `remove_self` and `help`, and forwards every
+other key — `at=` included — verbatim to each member's own handler via the
+router's `objectHandler`, so `/drums gain=0 4b at=cycle` fades all of them on
+one boundary and `/drums random` rolls all of them. It has no per-command
+knowledge of what it forwards, which is why groups work with commands written
+before they existed. Members are **names**, resolved fresh per command (so a
+group survives a `/recall` that rebuilds a member; one that no longer resolves
+prints as `(missing)`), may name another group (cycles are entered once), and
+are validated at `add_group`/`members=` time rather than at use. Channels, processors, and modulators all take the
 loop-automation family: `automate=<param> to= [from= beat= duration= curve=
 once]` (beats, loop-relative, replayed every pass — the pattern-position
 sibling of a one-off console ramp), `automations` (indexed list),
@@ -541,6 +598,27 @@ at=cycle`. `/save_session`/`/load_session` also have literal aliases
 `/save_json`/`/load_json` (same handler; the mixer's Transport bar runs
 these via two buttons).
 
+**Recording** (`recorder.js`, `engine.recorder`). `/record` starts,
+`/stop_record` stops (both take `at=`, which is the point — a take bounded by
+cycle boundaries is a whole number of loops), `/save_record` encodes and
+downloads, `/clear_record` discards, `/recording` reports and carries the
+three settings: `mode=stereo|multitrack`, `bits=32|16`, `max_minutes=<n>`.
+Capture is an `AudioWorkletProcessor` compiled from an inline blob URL (no
+separate asset for a bundler to special-case), one node per tap, buffering
+4096 frames and transferring `ArrayBuffer`s to the main thread. Taps read each
+channel's `output` — post-fader/pan/mute. `stereo` taps master alone;
+`multitrack` taps every track, then every bus, then master, and all nodes are
+created in one synchronous block so the files are sample-aligned. WAV is
+written here (32-bit IEEE float, or 16-bit PCM with clamping); multitrack is
+packed into a store-only ZIP written inline (CRC32 + local/central headers).
+`/record` is the only command besides `/load_session` that is **async**: the
+worklet module is awaited *before* `at=` resolves, so the deferred start
+itself is synchronous — a rejection inside a bare `scheduleAt` timer has no
+command left to report against. A take is deliberately absent from
+`snapshotSession`/`sessionToJSON`: it is the output of a performance, not part
+of its description. `Ribbit.dispose()` calls `recorder.dispose()`, since an
+unflushed recorder holds timers and an unsaved take holds hundreds of MB.
+
 `recall name=<state>` reuses this exact same trailing-duration-on-a-`key=value`
 mechanism for its own `name=` param (`recall name=verse1 4b at=cycle`) rather
 than inventing a second ramp syntax — `isRamp(params.name)` is true whenever
@@ -607,9 +685,12 @@ falls back to the platform default).
 `CodeEditor.svelte` is the text console. `Mixer.svelte` has a `Transport.svelte`
 bar (engine on/off; a clock LED that pulses per beat inside a conic-gradient
 ring that sweeps once per loop; beat/bpm readout — polled into local state
-so a `/clock` change shows even while stopped; and Save JSON/Load JSON
-buttons that run `/save_json`/`/load_json` through the same command path as
-typing), then Tracks/Buses/Master side by side in one row (Tracks grows to
+so a `/clock` change shows even while stopped; `Recorder.svelte` — REC,
+a duration/channel readout, an ST/MT mode toggle disabled while recording,
+and Save/× — and Save JSON/Load JSON
+buttons; every one of these runs its console command through the same path as
+typing, so the result lands in the scrollback), then Tracks/Buses/Master side
+by side in one row (Tracks grows to
 fill it and scrolls its own strips once they overflow, rather than pushing
 Master onto a second row; Master is fixed-size, never collapsible or
 resizable) and Modulators as its own full-width row below (collapsible, not
@@ -703,7 +784,7 @@ and do nothing.
   An `onCycle(cycleIndex)` clock hook now exists for per-N-cycle regeneration
   (see `RibbitClock`), but **nothing consumes it yet** —
   `generateEvents(fromBeat, toBeat)`'s absolute-beat design sidesteps needing
-  it for all five generators, and `patternvariator` regenerates only on reseed
+  it for every generator, and `patternvariator` regenerates only on reseed
   by deliberate choice: a pattern that quietly rewrites itself while you're
   working on something else is very hard to play with.
 - The harmony context is a live key/scale (`/harmony root= scale=`), not a
@@ -756,10 +837,7 @@ and do nothing.
   ~90 numbers. `synths/cz-tones.js` holds 28 patches decoded from sysex; every
   `param` is a modifier over the selected tone, and every option but `preset`
   takes the sentinel `"preset"` meaning "use the tone's value" — which is what
-  stops the two layers writing to each other. `lines`/`octave` declare no
-  `choices`: the console coerces numeric-looking values to Numbers before
-  `applyOptions`' strict `includes()`, so a declared `"1"` can never match a
-  typed `1` (same reason `tapepad`'s `voices`/`bits` validate in `set()`).
+  stops the two layers writing to each other.
 - **`chaossynth` is the one synth where a MIDI note isn't a pitch.** `seed`
   builds one configuration of all ten control points per MIDI note (0..127), so
   a note selects a *state*; `spread` lerps from the hand-set params toward that
@@ -838,17 +916,16 @@ and do nothing.
   load, so a file saved outside the repo before a type was removed has to
   be hand-edited. That's the standing cost of removing a shipped type (see
   `docs/dev/removing-a-type.md`).
-- Ramping/deferred `at=` scheduling/loop automation on an **`onSet`-based**
-  multi-node param (`RibbitDelay`'s `time`/`feedback`) only animates the
-  "primary" node directly — the other node (e.g. delay's R side) only gets
-  updated correctly by a plain, immediate (non-ramped, non-deferred) instant
-  set. This is now a limitation of `onSet` specifically, not of multi-node
-  params in general: the `ConstantSourceNode`-into-several-`AudioParam`s
-  technique (`RibbitProcessor.createCrossfade`, `RibbitTilt`'s `tone`/`pivot`)
-  drives every target correctly through ramps too. `RibbitDelay` has not been
-  converted — its two delay times differ by `stereoOffset` rather than being
-  a fixed ratio, so it needs a summed offset node rather than a straight
-  scaler, and nobody has needed it enough yet.
+- A `comb` in `mode=feedback` **cannot resonate above ~344Hz** (~375 at 48k):
+  a Web Audio cycle must contain a `DelayNode`, and the spec floors that at one
+  render quantum — the same wall `karplus` answered by rendering into a buffer,
+  which a live insert can't do. `mode=feedforward` is in no loop and combs the
+  whole range; `describeState()` reports when `time` is under the floor.
+- Mute/solo (like every other ramp) **don't take effect while the engine is
+  stopped**: the 10ms declick ramp can't advance against a frozen
+  `currentTime`. It lands the moment the transport starts, and nothing is
+  audible in between, but a stopped channel reported as muted still reads
+  `muteGain.gain.value === 1`.
 - `RibbitLimiter` (and the `goodenizer`'s limiter stage) is a fast, high-ratio
   `DynamicsCompressorNode`, **not a lookahead brickwall** — Web Audio offers no
   lookahead, so a fast enough transient can exceed `ceiling`. Treat it as

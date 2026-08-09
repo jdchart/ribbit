@@ -1,5 +1,5 @@
 import { RibbitProcessor } from "../processor.js";
-import { RibbitParam } from "../param.js";
+import { RibbitParam, RibbitParamSources } from "../param.js";
 
 // A stereo ping-pong delay: independent left/right delay lines whose feedback
 // crosses to the *opposite* channel (L's tail feeds R's delay line and vice
@@ -10,19 +10,18 @@ export class RibbitDelay extends RibbitProcessor {
         super(audioContext, { name });
         this.llm_summary = "A stereo delay: independent left/right delay lines with cross-feedback (ping-pong) and a small time offset between channels for width.";
 
-        this.stereoOffset = stereoOffset;
-
-        // Runtime-settable — /delay stereoOffset=0.02 re-derives the R
-        // side's delay time from the current base time. Round-tripped via
-        // the base getOptions().
+        // Runtime-settable — /delay stereoOffset=0.02 widens the two lines
+        // apart without touching the base time. Round-tripped via the base
+        // getOptions(). The value lives on its own ConstantSourceNode summed
+        // into the R line's delayTime (see below), so it and `time` add in
+        // the graph rather than one having to re-derive the other.
         this.options = {
             stereoOffset: {
-                get: () => this.stereoOffset,
+                get: () => this._offset.get(),
                 set: (value) => {
                     const num = Number(value);
                     if (!Number.isFinite(num) || num < 0 || num > 1) throw new Error(`invalid stereoOffset "${value}" — seconds, 0..1`);
-                    this.stereoOffset = num;
-                    this.delayR.delayTime.value = this.delayL.delayTime.value + num;
+                    this._offset.set(num);
                 },
             },
         };
@@ -32,13 +31,37 @@ export class RibbitDelay extends RibbitProcessor {
 
         this.delayL = audioContext.createDelay(5);
         this.delayR = audioContext.createDelay(5);
-        this.delayL.delayTime.value = time;
-        this.delayR.delayTime.value = time + stereoOffset;
 
         this.feedbackL = audioContext.createGain();
         this.feedbackR = audioContext.createGain();
-        this.feedbackL.gain.value = feedback;
-        this.feedbackR.gain.value = feedback;
+
+        // time and feedback each drive two nodes, and both intrinsic values
+        // therefore start at zero: every change arrives as a *summed
+        // connection* from one ConstantSourceNode, the technique tilt.js and
+        // RibbitProcessor.createCrossfade already use. This is what these two
+        // used to do with RibbitParam's onSet, which only overrides the
+        // instant-set path — so a ramp animated the L line while the R line
+        // stayed put, and the two channels drifted apart for the length of
+        // every glide. Now one param moves both, through sets, ramps,
+        // deferred at= scheduling and /patch alike.
+        this.delayL.delayTime.value = 0;
+        this.delayR.delayTime.value = 0;
+        this.feedbackL.gain.value = 0;
+        this.feedbackR.gain.value = 0;
+
+        this._paramSources ??= new RibbitParamSources(audioContext);
+        const timeParam = this._paramSources.create(time, { min: 0, max: 5 });
+        const feedbackParam = this._paramSources.create(feedback, { min: 0, max: 0.95 });
+        // Not exposed as a param (it's the stereoOffset option's backing
+        // store), just a second constant summing onto the R line so width and
+        // base time stay independent numbers in the graph.
+        this._offset = this._paramSources.create(stereoOffset, { min: 0, max: 1 });
+
+        timeParam.sourceNode.connect(this.delayL.delayTime);
+        timeParam.sourceNode.connect(this.delayR.delayTime);
+        this._offset.sourceNode.connect(this.delayR.delayTime);
+        feedbackParam.sourceNode.connect(this.feedbackL.gain);
+        feedbackParam.sourceNode.connect(this.feedbackR.gain);
 
         this.wetGain = audioContext.createGain();
         this.wetGain.gain.value = wet;
@@ -63,34 +86,23 @@ export class RibbitDelay extends RibbitProcessor {
         this.wetGain.connect(this.output);
 
         // Console/UI-facing control surface (see commands.js's applyParams).
-        // time/feedback each drive two nodes (the R side, offset for time),
-        // so they use onSet to fan the instant-set path out correctly; the
-        // "primary" AudioParam (L side) is still what ramping/deferred at=
-        // scheduling animates directly — see RibbitParam.
         // Bounds: time's max matches createDelay(5) above (the node itself
-        // clamps past that); feedback stays below unity because the two
-        // cross-feeding delay lines otherwise recirculate a growing signal
-        // forever (a runaway feedback loop, not an effect); wet allows up to
-        // a 2x boost but not an unbounded one.
+        // clamps past that, and stereoOffset can push the R line to it);
+        // feedback stays below unity because the two cross-feeding delay
+        // lines otherwise recirculate a growing signal forever (a runaway
+        // feedback loop, not an effect); wet allows up to a 2x boost but not
+        // an unbounded one.
         this.params = {
-            time: new RibbitParam(this.delayL.delayTime, {
-                min: 0,
-                max: 5,
-                onSet: (value) => {
-                    this.delayL.delayTime.value = value;
-                    this.delayR.delayTime.value = value + this.stereoOffset;
-                },
-            }),
-            feedback: new RibbitParam(this.feedbackL.gain, {
-                min: 0,
-                max: 0.95,
-                onSet: (value) => {
-                    this.feedbackL.gain.value = value;
-                    this.feedbackR.gain.value = value;
-                },
-            }),
+            time: timeParam,
+            feedback: feedbackParam,
             wet: new RibbitParam(this.wetGain.gain, { min: 0, max: 2 }),
         };
+    };
+
+    // Kept as a plain property for anything reading it directly; the value
+    // itself lives on the ConstantSourceNode above.
+    get stereoOffset() {
+        return this._offset.get();
     };
 
     // Thin aliases onto params.*'s own AudioParams (not second

@@ -192,11 +192,13 @@ others has:
   selecting a tone never clobbers an override and an override never needs
   re-applying, and neither layer writes to the other. Copy that before
   inventing a scheme where an option's setter reaches into `params`.
-- **An option whose values look numeric can't use `choices`.** The console
-  coerces `1` and `-1` to Numbers before `applyOptions`, whose choices test is
-  a strict `includes()`, so a declared `"1"` never matches. Validate in
-  `set()` instead (as `tapepad`'s `voices`/`bits` and `czsynth`'s
-  `lines`/`octave` do) and accept losing ghost-text completion.
+- **An option whose values look numeric can still use `choices`.**
+  `applyOptions` compares stringified, so a declared `"1"`/`"-1"` matches a
+  typed `1`/`-1` (the console coerces numeric-looking tokens to Numbers on the
+  way in). Declare `choices` *and* keep validating in `set()` — the setter is
+  the path a session file and a direct host call take, and it's where the value
+  gets normalized back to a string (`tapepad`'s `voices`/`bits`, `czsynth`'s
+  `lines`/`octave`).
 
 If the cost is more than a millisecond per note, **measure it and write the
 number down** (`chaossynth`: ~5.6ms per 2-second note) and cap the render
