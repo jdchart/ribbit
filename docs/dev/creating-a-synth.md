@@ -222,14 +222,27 @@ voice per call, so a chord is simply several calls at the same beat. There's no
 voice allocator and nothing to run out of.
 
 `granular` pushes that further and is the example to read if your synth
-schedules **many** nodes per note: it places a whole cloud of grains (three
-nodes each) on the audio clock inside one `trigger()`, with no timers. Two
-rules it follows that generalize — put anything shared across a note's nodes
-on *one* node rather than per-node (its grain windows are unit-amplitude
-`Float32Array`s shared engine-wide, because level lives on the voice gain),
-and when a note would exceed your node budget, **thin it rather than truncate
-it**: a texture that gets sparser is a texture, a note that stops halfway
-through is a bug you can hear.
+schedules **many** nodes per note. Three rules it follows that generalize:
+
+- **Don't build a whole note's nodes inside `trigger()`.** `granular` used to,
+  and 152 grains at 3 nodes each blocked the main thread for ~6ms — inside a
+  25ms clock tick, several times over for a chord, so the tick that should have
+  scheduled the next beat was still building the last one and the transport
+  audibly dragged. It now records the note and emits its grains a lookahead
+  window at a time from `onSchedule` (every synth is a clock unit, so that hook
+  is already yours — see `clock.js`), which costs ~0.3ms a note. Freeze the
+  params you read at trigger time into the pending-note record, or "read fresh
+  per note" quietly becomes "read fresh per grain".
+- **Put anything shared across a note's nodes on *one* node.** Its grain
+  windows are unit-amplitude `Float32Array`s shared engine-wide, because level
+  lives on the voice gain; its per-grain random pan is quantized to 11 shared
+  `StereoPanner`s per note, because the exact value of a random draw carries no
+  information and one panner per grain made it the most-allocated node in the
+  engine.
+- **When a note would exceed your budget, thin it rather than truncate it.** A
+  texture that gets sparser is a texture; a note that stops halfway through is a
+  bug you can hear. Bound *concurrency*, not just the total: `density` and
+  `grain_size` each have a sane range and their product doesn't.
 
 `karplus`, `chaossynth` and `czsynth` render audio with a **JS loop into an
 `AudioBuffer`** instead of building a node graph. Worth knowing as a technique,

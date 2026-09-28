@@ -14,8 +14,9 @@ Conceptually closest to a tiny text-driven Max/MSP or SuperCollider.
 A host app can layer natural language on top — translating free text into this
 same command vocabulary or direct graph mutations via an LLM. Ribbit itself
 stays NL-agnostic; that layer lives in the interface. (The reference host app,
-NLLC — Natural Language Live Coding — that ribbit was extracted from has an
-`Ollama()` stub for exactly this.)
+NLLC — Natural Language Live Coding — that ribbit was extracted from has one:
+it answers questions about the live session today, with command generation the
+next step. Nothing in it reaches back into the engine.)
 
 ## Object model
 
@@ -72,7 +73,11 @@ running (this is exactly what `SessionPage.svelte`'s `onMount` cleanup is for).
   that walks the **sends graph** in both directions from every soloed channel
   and silences only what can neither reach a soloed channel nor be reached from
   one, which is what keeps a soloed track's reverb bus (and a soloed bus's
-  feeder tracks) alive. Master is never silenced by solo and refuses `solo`.
+  feeder tracks) alive. The two directions are **two separate walks, both
+  seeded from the soloed set** — grown as one fixpoint the downstream rule
+  feeds the upstream one (soloed track → its reverb bus → every other track
+  sending to that bus), and solo silences nothing on any session with a shared
+  bus. Master is never silenced by solo and refuses `solo`.
 - **`RibbitSynth`** (base of `RibbitOscSynth`, `RibbitSampler`,
   `RibbitPercSampler`, `RibbitKarplus`, `RibbitGranular`): produces sound. Has
   `events` (`RibbitEvent{beat,pitch,degree,velocity,duration}` — starts **empty**,
@@ -756,8 +761,9 @@ and do nothing.
 
 ## Known current limitations (don't assume otherwise)
 
-- Ribbit has no natural-language layer — that lives in the host app (the NLLC
-  reference app keeps an `Ollama()` stub for it; no NL-to-command wiring exists yet).
+- Ribbit has no natural-language layer — that lives in the host app. The NLLC
+  reference app has one that answers questions about the live session; no
+  NL-to-command wiring exists yet, in either project.
 - Manual event authoring (`add_event`/`events`/`remove_event`/
   `clear_events`) and algorithmic generation coexist: an event-generating
   modulator (`randomnotes`, `markovpercs`, `euclidpercs`) can patch into a
@@ -906,9 +912,14 @@ and do nothing.
   `direction` is not `forward`, since Web Audio has no backwards playback so a
   reversed copy must be built. It peak-normalizes each source on load (capped
   20x) because an unmastered library spans ~30dB and a random roll would
-  otherwise invalidate every mix decision. Its per-note cost is a whole cloud
-  of grains at 3 nodes each, scheduled up front and capped at 400 (over
-  budget, the cloud thins rather than truncating).
+  otherwise invalidate every mix decision. Its per-note cost is a cloud of
+  grains at 2 nodes each (plus 11 shared per-note pan buses), **emitted a
+  lookahead window at a time** from the clock's `onSchedule` hook rather than
+  built at `trigger()` — materializing a whole cloud in one call blocked the
+  main thread for ~6ms a note and audibly dragged the transport, and is the
+  mistake to not repeat in any synth with a per-note node count. Two ceilings,
+  both thinning rather than truncating: 400 grains per note, 40 sounding at
+  once (`density * grain_size`, which nothing else bounds).
 - `splitCommands` (multi-command-per-line) assumes no param value contains a
   literal `/`; none currently do, but a value that did would be mis-split.
 - A session naming a removed type fails cleanly (`assertKnownTypes`, see

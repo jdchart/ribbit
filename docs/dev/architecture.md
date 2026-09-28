@@ -293,13 +293,22 @@ that decides `audible = !muted && !_soloSilenced` and ramps `muteGain` over
 **Solo can't be decided locally**, which is why it isn't just a second flag on
 the channel. What you hear depends on every *other* channel's solo state, so
 `setSoloed` calls `Ribbit.updateSolo()` (reached through the `engine`
-back-reference every channel is constructed with). That grows an audible set
-from the soloed channels outward along the **sends graph in both directions**
-until it stops growing, and silences the rest via `_setSoloSilenced`. The walk
-is the whole feature: without it, soloing a track would silence the bus
-carrying half of its sound, and soloing a bus would silence everything feeding
-it. Master is never in the pool and refuses `solo`. The sends graph can change
-under a live solo, so `addSend`/`removeSend` re-derive it too.
+back-reference every channel is constructed with). That walks the **sends
+graph in both directions** from the soloed channels and silences the rest via
+`_setSoloSilenced`. The walk is the whole feature: without it, soloing a track
+would silence the bus carrying half of its sound, and soloing a bus would
+silence everything feeding it. Master is never in the pool and refuses `solo`.
+The sends graph can change under a live solo, so `addSend`/`removeSend`
+re-derive it too.
+
+The two directions are **two separate walks, both seeded from the soloed set**,
+and that is the subtlety worth not rediscovering. Grown as one fixpoint set,
+the downstream rule feeds the upstream one: solo a track, its reverb bus joins
+as a destination, and then every *other* track sending to that same bus joins
+as one of the bus's senders — so on any session with a shared bus (which is
+most of them) solo silences nothing at all. What makes a channel audible is its
+relationship to something **soloed**, never to something that merely got swept
+in.
 
 `_rewireChain()` rebuilds the `input → panner → gainNode` portion every time a
 processor is added/removed/bypassed, skipping any processor with `active ===

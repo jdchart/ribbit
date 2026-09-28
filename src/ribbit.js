@@ -590,6 +590,15 @@ export class Ribbit {
     // track and its reverb bus keeps working (downstream); solo the reverb
     // bus and the tracks feeding it keep playing (upstream). Without the walk,
     // soloing one track would mute the bus carrying half its sound.
+    //
+    // The two directions have to be walked *separately*, from the soloed set
+    // each time, and that is the whole subtlety here. Grown as one set, the
+    // downstream rule feeds the upstream one: solo a track, its reverb bus
+    // joins the set as a destination, and then every other track sending to
+    // that same bus joins as one of its senders — so on any session with a
+    // shared bus (which is most of them) solo silences nothing at all. What
+    // makes a channel audible is its relationship to something *soloed*, never
+    // to something that merely got swept in.
     updateSolo() {
         const channels = [...this.tracks, ...this.buses];
         const soloed = channels.filter((channel) => channel.soloed);
@@ -599,28 +608,34 @@ export class Ribbit {
             return;
         }
 
-        // Grow the audible set until it stops growing: a member's send
-        // destinations join it (downstream), as does anything sending into a
-        // member (upstream). Master is never in `channels` and never
-        // silenced — it's where everything audible has to arrive.
+        // Master is in neither walk: it's never in `channels`, never silenced,
+        // and is where everything audible has to arrive.
         const audible = new Set(soloed);
-        let grew = true;
-        while (grew) {
-            grew = false;
+
+        // Downstream: where a soloed channel's signal goes, and onward.
+        const downstream = [...soloed];
+        while (downstream.length > 0) {
+            for (const send of downstream.pop().sends) {
+                const destination = send.destination;
+                if (!channels.includes(destination) || audible.has(destination)) continue;
+                audible.add(destination);
+                downstream.push(destination);
+            }
+        }
+
+        // Upstream: what feeds a soloed channel, and what feeds that. Seeded
+        // from `soloed` rather than from `audible`, or this would re-admit
+        // everything the downstream walk just pulled in.
+        const reaching = new Set(soloed);
+        const upstream = [...soloed];
+        while (upstream.length > 0) {
+            const target = upstream.pop();
             for (const channel of channels) {
-                if (audible.has(channel)) {
-                    for (const send of channel.sends) {
-                        if (channels.includes(send.destination) && !audible.has(send.destination)) {
-                            audible.add(send.destination);
-                            grew = true;
-                        }
-                    }
-                    continue;
-                }
-                if (channel.sends.some((send) => audible.has(send.destination))) {
-                    audible.add(channel);
-                    grew = true;
-                }
+                if (reaching.has(channel)) continue;
+                if (!channel.sends.some((send) => send.destination === target)) continue;
+                reaching.add(channel);
+                audible.add(channel);
+                upstream.push(channel);
             }
         }
 

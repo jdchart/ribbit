@@ -22,6 +22,25 @@ const DEFAULT_FOLDER = "foley";
 // while one that gets grainier is a texture.
 const MAX_GRAINS = 400;
 
+// Ceiling on how many grains of one note may be *sounding at once*, which is
+// the number the audio thread actually pays for: a grain lasts `grain_size`
+// seconds and they arrive `1/density` apart, so the overlap is
+// `density * grain_size` and nothing in the two params' own ranges bounds it —
+// `density=200 grain_size=2` is four hundred buffer sources resampling in
+// parallel, per voice, per track. Thins the same way MAX_GRAINS does (stretch
+// the interval, keep the span) because the alternative is the whole session
+// dropping out, which is not a quieter version of the sound.
+const MAX_OVERLAP = 40;
+
+// How far ahead of the audio clock grains are placed, in seconds. Comfortably
+// more than the clock's own 0.1s scheduling horizon and four times its 25ms
+// tick, so a cloud is always at least one tick's worth ahead of itself.
+const GRAIN_LOOKAHEAD = 0.25;
+
+// How many distinct pan positions one note's grains are spread across — see
+// _panBus. Odd, so dead centre is one of them.
+const PAN_BUCKETS = 11;
+
 // Random spread applied to each grain's start time, as a fraction of the
 // nominal interval between grains. Not exposed: a perfectly periodic cloud
 // combs — regular spacing at, say, 30 grains/second is a 30Hz amplitude
@@ -93,10 +112,13 @@ const DIRECTIONS = ["forward", "reverse", "mixed"];
 // one hand can be on the shape of the note and the other on the shape of the
 // grain, which is exactly the split a modular granular patch has.
 //
-// Every grain of a note is scheduled up front, at trigger time, into the
-// browser's audio clock — no timers, nothing running between notes. Polyphony
-// is therefore free, as in karplus: a chord is three clouds overlapping and
-// there is no voice allocator to run out of.
+// A note's grains go onto the browser's audio clock a lookahead window at a
+// time, fed by the same clock tick that schedules everything else (see
+// `onSchedule` and `_emit`) — no timers of its own. Polyphony is still free, as
+// in karplus: a chord is three clouds overlapping and there is no voice
+// allocator to run out of. What isn't free is *building* the nodes, which is
+// why the cloud is no longer materialized in one burst at trigger time; `_emit`
+// carries the measurements.
 //
 // Pitch works even though foley isn't pitched: a degree resolves against the
 // shared harmony context and sets each grain's playbackRate relative to
@@ -136,6 +158,12 @@ export class RibbitGranular extends RibbitSynth {
         this._reversed = null;
         // Gain match for the current source, measured at load — see _measure.
         this._normalize = 1;
+
+        // Notes whose grains are still being placed, or whose grains are still
+        // sounding — see trigger/_emit/_retire. Every note lives here for its
+        // whole life, which is what gives the voice gain something to be
+        // disconnected by when it's over.
+        this._clouds = [];
 
         // Bumped by every source change, for the same reason percsampler does
         // it: a random roll finishes asynchronously and replaces the buffer
@@ -314,6 +342,8 @@ export class RibbitGranular extends RibbitSynth {
     // more here than in the other samplers — a field recording can be tens of
     // megabytes decoded, and the reversed copy doubles it.
     dispose() {
+        for (const cloud of this._clouds) this._retire(cloud);
+        this._clouds.length = 0;
         this._paramSources.dispose();
         this.buffer = null;
         this._reversed = null;
@@ -449,8 +479,9 @@ export class RibbitGranular extends RibbitSynth {
         this._reversed = reversed;
     };
 
-    // Schedules one note: a whole cloud of grains, all of them placed on the
-    // audio clock before this returns.
+    // Schedules one note. What's built here is the note — its voice envelope,
+    // and a frozen record of every param the cloud will read — not the cloud
+    // itself: the grains are emitted by _emit as the audio clock reaches them.
     trigger(time, event, secondsPerBeat) {
         const buffer = this.buffer;
         if (!buffer) return;
@@ -501,69 +532,191 @@ export class RibbitGranular extends RibbitSynth {
         else voiceGain.gain.setValueAtTime(0.0001, time + held);
         voiceGain.connect(this.output);
 
-        // Grain spacing. If the note would need more grains than the ceiling
-        // allows, the interval stretches so the cloud still spans the whole
-        // note: a thinner texture, never a note that stops early.
+        // Grain spacing, under two independent ceilings. Both thin the cloud by
+        // stretching the interval rather than cutting it short: a pad that
+        // stops halfway through is a bug you can hear, one that gets grainier
+        // is a texture. MAX_OVERLAP bounds what sounds at once (the audio
+        // thread's cost) and is applied first; MAX_GRAINS bounds the note's
+        // total (the main thread's) and can only thin further, never undo it.
         let interval = 1 / density;
+        if (grainSeconds / interval > MAX_OVERLAP) interval = grainSeconds / MAX_OVERLAP;
         let count = Math.max(1, Math.ceil(total / interval));
         if (count > MAX_GRAINS) {
             count = MAX_GRAINS;
             interval = total / count;
         }
 
-        const curve = windowCurve(this.window);
-        const duration = buffer.duration;
-        const reversible = this.direction !== "forward" && this._reversed;
+        this._clouds.push({
+            voiceGain,
+            // Filled lazily by _panBus, and null for a note with no spread.
+            panBuses: null,
+            time,
+            total,
+            interval,
+            count,
+            // How far through the cloud _emit has got: `emitted` against the
+            // count, `cursor` in seconds from the note's start.
+            emitted: 0,
+            cursor: 0,
+            // Every param the cloud reads, resolved once here — which is what
+            // makes "read fresh per note, so a ramp applies from the next note
+            // onward" still true now that the grains are built later.
+            rate,
+            grainSeconds,
+            spray,
+            position,
+            drift,
+            pitchSpread,
+            panSpread,
+            curve: windowCurve(this.window),
+            buffer,
+            // Resolved per note for the same reason: switching `direction`
+            // mid-note shouldn't reach back into a cloud already in flight.
+            reversed: this.direction !== "forward" ? this._reversed : null,
+            alwaysReverse: this.direction === "reverse",
+            // When the last grain can no longer be sounding, whenever it was
+            // placed — the moment this note's nodes can be let go of.
+            endTime: time + total + grainSeconds + 0.05,
+        });
 
-        for (let i = 0; i < count; i++) {
-            // Regular spacing plus jitter — see TIME_JITTER. Without this the
-            // cloud amplitude-modulates itself at exactly `density` Hz.
-            const offset = Math.max(0, i * interval + (Math.random() * 2 - 1) * interval * TIME_JITTER);
-            if (offset > total) continue;
+        // The clock's next tick is up to lookaheadMs away and this note may
+        // start before then, so the head of the cloud goes out now.
+        this._emit();
+    };
 
-            const detune = pitchSpread > 0 ? (Math.random() * 2 - 1) * pitchSpread : 0;
-            const grainRate = rate * Math.pow(2, detune / 12);
-            // How much source material this grain consumes. A grain that runs
-            // off the end of the buffer just stops early and leaves a hole, so
-            // read positions are wrapped inside the span that guarantees a
-            // whole grain rather than inside the whole buffer.
-            const consumed = Math.min(duration, grainSeconds * grainRate);
-            const span = Math.max(0.001, duration - consumed);
+    // The clock's per-tick hook (see clock.js). Every synth is registered as a
+    // clock unit, so a cloud needs nothing of its own to keep feeding itself —
+    // and it inherits the right behaviour for free at both ends: a stopped
+    // track (`active === false`) stops spawning grains into its own tail, and
+    // nothing advances at all while the transport is stopped, which is the same
+    // frozen-currentTime rule every ramp in the engine already follows.
+    onSchedule() {
+        this._emit();
+    };
 
-            // The playhead: `position` sets where the cloud reads, `drift`
-            // moves it as the note is held, `spray` scatters each grain around
-            // wherever that has got to.
-            const wander = position * duration + drift * offset + (Math.random() * 2 - 1) * spray;
-            const read = ((wander % span) + span) % span;
+    // Places every grain now due, across every note in flight, and lets go of
+    // the notes that are over.
+    //
+    // Grains are emitted a window at a time rather than a whole cloud at
+    // trigger time, and that is the difference between this synth being usable
+    // and not. Measured on granular-pad (three tracks, density 18): a note
+    // materialized 152 grains as 456 Web Audio nodes and blocked the main
+    // thread for 6.2ms doing it — and a chord is several notes, all landing
+    // inside one 25ms clock tick, so the tick that should have scheduled the
+    // next beat was still building the last one. That is what makes the
+    // transport audibly drag. Spread over the ticks the grains actually belong
+    // to, the same cloud costs a millisecond or two per tick.
+    _emit() {
+        if (this._clouds.length === 0) return;
+        const now = this.audioContext.currentTime;
 
-            const reverse = reversible && (this.direction === "reverse" || Math.random() < 0.5);
-
-            const source = ctx.createBufferSource();
-            source.buffer = reverse ? this._reversed : buffer;
-            source.playbackRate.value = grainRate;
-
-            const grainGain = ctx.createGain();
-            // The window. One shared unit-amplitude curve for every grain in
-            // the engine — level lives on voiceGain above — so this allocates
-            // nothing per grain. The curve holds at 0 afterwards, which is why
-            // no explicit fade-out is needed before stop().
-            grainGain.gain.setValueCurveAtTime(curve, time + offset, grainSeconds);
-
-            if (panSpread > 0) {
-                const panner = ctx.createStereoPanner();
-                panner.pan.value = (Math.random() * 2 - 1) * panSpread;
-                source.connect(grainGain).connect(panner).connect(voiceGain);
-            } else {
-                source.connect(grainGain).connect(voiceGain);
+        for (let index = this._clouds.length - 1; index >= 0; index--) {
+            const cloud = this._clouds[index];
+            // Jitter can pull a grain up to half an interval earlier than its
+            // nominal slot, so the horizon leads by that much extra — without
+            // it, a jittered grain at a low density could come out with a start
+            // time already in the past, which a source silently rounds up to
+            // "now" and hears as the cloud clumping.
+            const horizon = now + GRAIN_LOOKAHEAD + cloud.interval * TIME_JITTER;
+            while (cloud.emitted < cloud.count && cloud.time + cloud.cursor <= horizon) {
+                this._grain(cloud);
+                cloud.emitted += 1;
+                cloud.cursor += cloud.interval;
             }
 
-            // Reading the mirrored buffer means mirroring the position too: a
-            // grain covering forward seconds [read, read + consumed] starts, in
-            // the reversed copy, at duration - read - consumed.
-            const start = reverse ? Math.max(0, duration - read - consumed) : read;
-            source.start(time + offset, start);
-            // Must follow start() — stop() on an unstarted source throws.
-            source.stop(time + offset + grainSeconds + 0.01);
+            if (cloud.emitted >= cloud.count && now >= cloud.endTime) {
+                this._retire(cloud);
+                this._clouds.splice(index, 1);
+            }
+        }
+    };
+
+    // One grain, at the cloud's current cursor.
+    _grain(cloud) {
+        // Regular spacing plus jitter — see TIME_JITTER. Without this the
+        // cloud amplitude-modulates itself at exactly `density` Hz.
+        const offset = Math.max(0, cloud.cursor + (Math.random() * 2 - 1) * cloud.interval * TIME_JITTER);
+        if (offset > cloud.total) return;
+
+        const ctx = this.audioContext;
+        const buffer = cloud.buffer;
+        const duration = buffer.duration;
+        const grainSeconds = cloud.grainSeconds;
+
+        const detune = cloud.pitchSpread > 0 ? (Math.random() * 2 - 1) * cloud.pitchSpread : 0;
+        const grainRate = cloud.rate * Math.pow(2, detune / 12);
+        // How much source material this grain consumes. A grain that runs off
+        // the end of the buffer just stops early and leaves a hole, so read
+        // positions are wrapped inside the span that guarantees a whole grain
+        // rather than inside the whole buffer.
+        const consumed = Math.min(duration, grainSeconds * grainRate);
+        const span = Math.max(0.001, duration - consumed);
+
+        // The playhead: `position` sets where the cloud reads, `drift` moves it
+        // as the note is held, `spray` scatters each grain around wherever that
+        // has got to.
+        const wander = cloud.position * duration + cloud.drift * offset + (Math.random() * 2 - 1) * cloud.spray;
+        const read = ((wander % span) + span) % span;
+
+        const reverse = !!cloud.reversed && (cloud.alwaysReverse || Math.random() < 0.5);
+
+        const source = ctx.createBufferSource();
+        source.buffer = reverse ? cloud.reversed : buffer;
+        source.playbackRate.value = grainRate;
+
+        const grainGain = ctx.createGain();
+        // The window. One shared unit-amplitude curve for every grain in the
+        // engine — level lives on the voice gain — so this allocates nothing
+        // per grain. The curve holds at 0 afterwards, which is why no explicit
+        // fade-out is needed before stop().
+        grainGain.gain.setValueCurveAtTime(cloud.curve, cloud.time + offset, grainSeconds);
+        source.connect(grainGain);
+        grainGain.connect(this._panBus(cloud));
+
+        // Reading the mirrored buffer means mirroring the position too: a grain
+        // covering forward seconds [read, read + consumed] starts, in the
+        // reversed copy, at duration - read - consumed.
+        const start = reverse ? Math.max(0, duration - read - consumed) : read;
+        source.start(cloud.time + offset, start);
+        // Must follow start() — stop() on an unstarted source throws.
+        source.stop(cloud.time + offset + grainSeconds + 0.01);
+    };
+
+    // Where one grain's stereo placement comes from.
+    //
+    // A StereoPannerNode per grain is the obvious implementation and was the
+    // first one, but it makes the panner the single most-allocated node in the
+    // engine — 290 of them a second on granular-pad, one per grain, each used
+    // for a fraction of a second. Since a grain's pan is a *random* draw, its
+    // exact value carries no information: quantizing the draw to a handful of
+    // positions and sharing one panner per position is the same scattered
+    // stereo field for a fixed eleven nodes a note instead of one per grain.
+    // The buckets belong to the note rather than the synth because they have to
+    // sit upstream of its voice envelope.
+    _panBus(cloud) {
+        if (cloud.panSpread <= 0) return cloud.voiceGain;
+        if (!cloud.panBuses) cloud.panBuses = new Array(PAN_BUCKETS).fill(null);
+
+        const bucket = Math.floor(Math.random() * PAN_BUCKETS);
+        let bus = cloud.panBuses[bucket];
+        if (!bus) {
+            bus = this.audioContext.createStereoPanner();
+            bus.pan.value = ((bucket / (PAN_BUCKETS - 1)) * 2 - 1) * cloud.panSpread;
+            bus.connect(cloud.voiceGain);
+            cloud.panBuses[bucket] = bus;
+        }
+        return bus;
+    };
+
+    // Unwires a finished note. The grains themselves are one-shots the browser
+    // reclaims on its own, but the voice gain they were summed into is
+    // connected to this synth's output and would otherwise stay there — one
+    // more permanent node per note played, for the life of the session.
+    _retire(cloud) {
+        cloud.voiceGain.disconnect();
+        if (cloud.panBuses) {
+            for (const bus of cloud.panBuses) bus?.disconnect();
+            cloud.panBuses = null;
         }
     };
 };

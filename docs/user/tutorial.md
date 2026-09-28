@@ -164,7 +164,10 @@ lands exactly where you were:
 
 Solo is smarter than "mute everything else": anything that feeds a soloed
 channel, or is fed by one, keeps playing. Solo a track and its reverb bus keeps
-working; solo the reverb bus and the tracks feeding it keep playing. You can
+working; solo the reverb bus and the tracks feeding it keep playing. Note the
+relationship is to the channel you *soloed*, not to anything it dragged in —
+soloing one of three tracks that share a reverb keeps the reverb, but the other
+two tracks still drop out, including their own reverb tails. You can
 solo several channels at once. Both states show up in `/tracks` — a track
 that's quiet because something *else* is soloed says `[silenced by solo]`,
 which saves a lot of staring at a fader that's up. Both are also the **M** and
@@ -1075,9 +1078,10 @@ shifts the whole part's character:
 Two last things worth knowing. Recordings are **gain-matched on load** — the
 shipped foley folder spans about 30dB, so without it every roll of the dice
 would need a new fader setting; the track summary shows the match (`x20.0`).
-And `density` is the CPU knob, because every grain is three audio nodes and a
-note schedules its whole cloud in advance. 20–40 is a pad; 200 is a stress
-test.
+And `density` is the CPU knob, because every grain is a couple of audio nodes
+built and thrown away. 20–40 is a pad; 200 is a stress test — and past about 40
+grains sounding at once (`density x grain_size`) the cloud thins itself rather
+than let the audio thread fall over.
 
 `/code-editor/granular-pad` is the worked version: three granular tracks — a
 watery pad, reversed rain, and a shimmer an octave up — over a long reverb.

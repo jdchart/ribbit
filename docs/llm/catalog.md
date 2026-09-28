@@ -96,9 +96,12 @@ relative to `root`, so transposition is a tape-speed gesture.
   `percsampler` uses, read through the shared `src/samples.js`)
 - **note** — sources are **gain-matched on load** (peak-normalized, capped at
   20x), because a library of field recordings spans ~30dB and `sample=random`
-  would otherwise be a loudness lottery. Every grain is 3 nodes and a note
-  schedules its whole cloud up front, so `density` is the CPU knob; past 400
-  grains a note thins rather than truncating. `direction` other than `forward`
+  would otherwise be a loudness lottery. Every grain is a `BufferSource` plus a
+  gain, panned through 11 shared per-note `StereoPanner`s rather than one each,
+  and a note's cloud is emitted a lookahead window at a time off the clock tick
+  (`onSchedule`) rather than all at `trigger()`. `density` is still the CPU
+  knob; a note thins rather than truncating past 400 grains total or 40
+  sounding at once. `direction` other than `forward`
   builds a reversed copy of the buffer (Web Audio has no backwards playback),
   doubling what that instance holds in memory.
 

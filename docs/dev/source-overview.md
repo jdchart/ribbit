@@ -544,11 +544,40 @@ one or two.
 **The structure is two stages, and keeping them apart is the design.** A note
 is `voice envelope x sum of grains`: `attack`/`release` are on one
 `GainNode` per note, `density`/`grain_size`/`spray`/`position`/`drift`/
-`pitch_spread`/`pan_spread` govern what gets scheduled into it. Every grain of
-a note is placed on the audio clock inside `trigger()` — no timers, nothing
-running between notes — which is also why polyphony is free.
+`pitch_spread`/`pan_spread` govern what gets scheduled into it. A note's
+grains are placed on the audio clock a lookahead window at a time, off the
+clock tick — no timers of its own, nothing running between notes — which is
+also why polyphony is free.
 
-Five things worth knowing before editing it:
+Eight things worth knowing before editing it:
+
+- **`trigger()` records the note; `onSchedule()` builds the cloud.** It used to
+  do both at once, and that was the synth's defining bug: 152 grains at 3 nodes
+  each blocked the main thread for ~6.2ms per note, inside a 25ms clock tick,
+  several times over for a chord — so the tick that should have scheduled the
+  next beat was still building the last one, and the transport audibly dragged
+  (with the fans to match). Every synth is registered as a clock unit, so
+  `onSchedule` was already there for the taking; `_emit` now costs ~0.3ms a
+  note. Two consequences that fall out for free: a stopped track
+  (`active === false`) stops spawning grains into its own tail, and nothing
+  advances while the transport is stopped, which is the frozen-`currentTime`
+  rule every ramp in the engine already follows. Every param a cloud reads is
+  frozen into the pending record at trigger time, which is what keeps "read
+  fresh per note" true rather than silently becoming "per grain".
+- **Pan is quantized to `PAN_BUCKETS` shared panners per note.** One
+  `StereoPanner` per grain made it the most-allocated node in the engine (~290
+  a second on `granular-pad`, each used for a fraction of a second). A grain's
+  pan is a random draw, so its exact value carries no information — eleven
+  positions is the same scattered field for a fixed cost. The buckets belong to
+  the note, not the synth, because they have to sit upstream of its voice
+  envelope. `_retire` disconnects them and the voice gain when the note is over,
+  so a session doesn't accumulate one permanent gain node per note played.
+- **Two ceilings, and `MAX_OVERLAP` is the one that matters.** `MAX_GRAINS`
+  bounds a note's total (main-thread cost); `MAX_OVERLAP` bounds what sounds at
+  once (audio-thread cost) — `density * grain_size`, a product nothing in
+  either param's own range bounds, so `density=200 grain_size=2` was 400 buffer
+  sources resampling in parallel *per voice, per track*. Both thin by
+  stretching the interval, never by truncating.
 
 - **Grain windows are shared, unit-amplitude `Float32Array`s** (`WINDOWS`,
   built lazily per shape and cached module-wide), applied with
@@ -1837,8 +1866,16 @@ instance rather than holding any state of their own:
 ## Natural-language layer (host app, not ribbit)
 
 Ribbit has no natural-language layer of its own — that belongs to the host
-interface. The reference app (NLLC) keeps an `Ollama()` stub (`src/lib/scripts/
-ollama.js` in that project) as the intended integration point for routing
-natural-language input to ribbit's commands (or directly manipulating the
-`Ribbit` graph). It targets exactly the command vocabulary
-`createCommandRouter` exposes.
+interface. The reference app (NLLC) has one: it answers questions about the
+live session, using a text rendering of `snapshotSession` as context, and
+routing natural-language input to commands is the next step. It targets
+exactly the command vocabulary `createCommandRouter` exposes.
+
+The dependency runs one way only. That layer reads the engine through the
+public API (`snapshotSession`, `createCommandRouter`, `RESERVED_NAMES`) and
+nothing in `ribbit/` knows it exists — which is what lets ribbit be consumed by
+a host with no LLM at all. Two consequences worth knowing when adding a type
+here: the host's assistant is told about types by a file *in that project*, so
+a new synth needs a line added there too (see
+`.claude/tasks/synth_creation.md`), and a type's `llm_summary` field is where
+that line's wording comes from — it is prompt text, not a code comment.

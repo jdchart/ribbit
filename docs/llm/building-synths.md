@@ -149,8 +149,13 @@ spans tens of dB, so without it every re-roll invalidates the mix.
 `synths/granular.js` are the polyphonic ones (a chord is just several
 overlapping one-shot `BufferSource`s — no voice allocator to run out);
 `granular` is also the example for a synth that schedules *many* nodes per
-note (a whole grain cloud, up front, no timers — share anything common across
-them on one node, and thin rather than truncate when over budget). `karplus` and `chaossynth`
+note: a grain cloud emitted a lookahead window at a time from the clock's
+`onSchedule` hook (every synth is a clock unit) rather than built inside
+`trigger()`, which blocked the main thread ~6ms a note and dragged the
+transport. Share anything common across a note's nodes on one node, quantize
+random per-node values so the nodes can be shared too, and thin rather than
+truncate when over budget — bounding concurrency, not just the total.
+`karplus` and `chaossynth`
 *synthesize into an `AudioBuffer`*
 with a JS loop rather than building a node graph. Copy that approach when a
 node graph can't express the algorithm: the specific reason in `karplus` is that
