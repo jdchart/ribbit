@@ -920,8 +920,9 @@ and do nothing.
   mistake to not repeat in any synth with a per-note node count. Two ceilings,
   both thinning rather than truncating: 400 grains per note, 40 sounding at
   once (`density * grain_size`, which nothing else bounds).
-- `splitCommands` (multi-command-per-line) assumes no param value contains a
-  literal `/`; none currently do, but a value that did would be mis-split.
+- `splitCommands` (multi-command-per-line) splits only on a `/name` that
+  starts a token outside quotes, so sample paths are typeable
+  (`sample="foley/a b.wav"`). A value can't *begin* with `/name` unquoted.
 - A session naming a removed type fails cleanly (`assertKnownTypes`, see
   the sessions section) but is never *repaired*: there's no partial/lenient
   load, so a file saved outside the repo before a type was removed has to

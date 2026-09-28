@@ -180,14 +180,16 @@ doesn't fit the usual "addressed by its own name" shape.
 ## Multiple commands per submitted line
 
 `executeCommand(text)` (one of the two values `createCommandRouter` returns) first calls
-`splitCommands(text)`, which finds every `/name` occurrence in the submitted
-line and dispatches each segment independently through the normal path,
+`splitCommands(text)`, which finds every `/name` that starts a token (at the
+start of the line or after whitespace, and outside quotes) and dispatches each
+segment independently through the normal path,
 joining their results with newlines. This is what lets
 `/track_1 gain=0 8 /reverb wet=0.9 6b` run both together, scheduled off the
 same instant (they execute synchronously in one call stack). You don't need to
 do anything for a new command to participate in this — it's purely a
-preprocessing step before dispatch. It does assume no param value contains a
-literal `/`; none currently do.
+preprocessing step before dispatch. `suggestCompletion` finds the command
+being typed by the same token-start rule, so a `/` inside a value
+(`sample=foley/rain.wav`) is never mistaken for a new command.
 
 ## Ramp specs and the `at=` scheduling hint
 

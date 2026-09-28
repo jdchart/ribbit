@@ -1,4 +1,5 @@
 import { RibbitSynth } from "../synth.js";
+import { sampleName, sampleUrl } from "../samples.js";
 
 const SAMPLE_FILES = [
     "CLAUDE - kick02.wav",
@@ -8,12 +9,6 @@ const SAMPLE_FILES = [
     "CLAUDE - hat13.wav",
     "CLAUDE - hat14.wav",
 ];
-
-// Derives a short display name from a sample filename, e.g.
-// "CLAUDE - kick02.wav" -> "kick02".
-function sampleName(filename) {
-    return filename.replace(/^CLAUDE - /, "").replace(/\.\w+$/, "");
-};
 
 // A drum-machine-style synth: a fixed set of loaded sample buffers ("slots"),
 // where an event's pitch selects which one to play. Starts with an empty
@@ -54,22 +49,28 @@ export class RibbitSampler extends RibbitSynth {
         this.samples = samples;
         this.slots = samples.map((filename) => ({
             name: sampleName(filename),
-            // filenames contain spaces, so they must be URL-encoded to be
-            // fetchable — the host app is expected to serve sample files
-            // under a "/samples/" path (e.g. SvelteKit's static/samples).
-            url: `/samples/${encodeURIComponent(filename)}`,
+            // Relative to the host's "/samples/" path, and may include a
+            // folder ("kicks/a.wav") — see samples.js's sampleUrl, which
+            // encodes each segment rather than the "/" between them.
+            url: sampleUrl(filename),
             buffer: null,
         }));
         this._loaded = this._loadAll();
     };
 
     // Fetches and decodes every sample file in parallel, filling in each
-    // slot's `buffer` in place as it finishes.
+    // slot's `buffer` in place as it finishes. A file that fails leaves one
+    // silent slot and a warning — nothing awaits `_loaded`, so a rejection
+    // here would otherwise surface as an unhandled one (percsampler's rule).
     async _loadAll() {
         await Promise.all(this.slots.map(async (slot) => {
-            const response = await fetch(slot.url);
-            const arrayBuffer = await response.arrayBuffer();
-            slot.buffer = await this.audioContext.decodeAudioData(arrayBuffer);
+            try {
+                const response = await fetch(slot.url);
+                if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+                slot.buffer = await this.audioContext.decodeAudioData(await response.arrayBuffer());
+            } catch (error) {
+                console.warn(`${this.name}: couldn't load ${slot.url} — ${error.message}`);
+            }
         }));
     };
 

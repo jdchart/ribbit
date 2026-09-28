@@ -540,10 +540,11 @@ export class Ribbit {
 
         this._removePatchesReferencing(modulator);
         modulator.output.disconnect();
-        // Duck-typed, like generateEvents — most modulators (e.g. RibbitLFO)
-        // own nothing beyond `.output`; RibbitRandomNotes also owns a couple of
-        // internal nodes routed straight to audioContext.destination (see its
-        // own dispose() for why) that this alone wouldn't reach.
+        // Duck-typed, like generateEvents. Every built-in modulator has one:
+        // an LFO/CV's running source node has to be stopped, not just
+        // disconnected, and the rest own param sources routed straight to
+        // audioContext.destination (see RibbitParamSources) that
+        // output.disconnect() alone wouldn't reach.
         modulator.dispose?.();
 
         this.modulators.splice(index, 1);

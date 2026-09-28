@@ -516,5 +516,22 @@ export class RibbitTapePad extends RibbitSynth {
             source.start(time);
             source.stop(stopTime);
         }
+
+        // Unwire the note once it's over. The transport feeding each
+        // oscillator's detune is persistent, and a connection *from* a live
+        // node keeps its destination alive — so without this every note ever
+        // played stays attached to _pitchMod (and its voice chain to
+        // _voiceBus) for the life of the session. Same leak granular's
+        // _retire closes. All sources stop together, so one is enough to
+        // listen on.
+        // The try is for a synth disposed mid-note: dispose() already did a
+        // blanket _pitchMod.disconnect(), and a specific disconnect of an
+        // edge that no longer exists throws.
+        sources[0].onended = () => {
+            try {
+                for (const source of sources) this._pitchMod.disconnect(source.detune);
+            } catch { /* already unwired by dispose() */ }
+            voiceGain.disconnect();
+        };
     };
 };

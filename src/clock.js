@@ -1,5 +1,15 @@
 import { scheduleAutomationEvent } from "./automation.js";
 
+// bpm and loop length are divisors in every beat<->time conversion, and a
+// zero loop length sends _scheduleRange's per-loop split into an infinite
+// loop that freezes the tab. Refused here, where the value lands, so no path
+// in (console, session file, a host calling the clock directly) can set one.
+function assertPositive(value, label) {
+    if (!Number.isFinite(value) || value <= 0) {
+        throw new Error(`invalid ${label} "${value}" — expected a positive number`);
+    }
+};
+
 // A lookahead scheduler: rather than triggering sounds exactly when a setTimeout
 // fires (which drifts under load), it periodically looks a short window into the
 // future and schedules anything due using precise AudioContext time. Every
@@ -74,6 +84,7 @@ export class RibbitClock {
     // switch (only the rate of beats going forward changes). Cancels any
     // in-flight rampBpm so a plain instant set always wins over a stale ramp.
     setBpm(bpm) {
+        assertPositive(bpm, "bpm");
         this._cancelBpmRamp();
         this._applyBpm(bpm);
     };
@@ -97,6 +108,7 @@ export class RibbitClock {
     // setBpm always has. `startTime` (an AudioContext timestamp) defers the
     // ramp's start, e.g. for /clock bpm=140 8 at=cycle.
     rampBpm(targetBpm, durationSeconds, { startTime } = {}) {
+        assertPositive(targetBpm, "bpm");
         this._cancelBpmRamp();
         const beginTime = startTime ?? this.audioContext.currentTime;
         const startBpm = this.bpm;
@@ -134,6 +146,7 @@ export class RibbitClock {
     // tick. A change mid-loop can shift where the current loop boundary
     // falls, which is an accepted live-coding wrinkle rather than a bug.
     setLoopLengthBeats(beats) {
+        assertPositive(beats, "num_beats");
         this.loopLengthBeats = beats;
     };
 
@@ -176,12 +189,19 @@ export class RibbitClock {
         const now = this.audioContext.currentTime;
         const horizonBeat = (now + this.scheduleAheadTime - this.startTime) / this.secondsPerBeat;
 
-        try {
-            this._scheduleRange(this.scheduledUpTo, horizonBeat);
-        } catch (error) {
-            console.error("RibbitClock: error scheduling range, skipping", error);
+        // The horizon only ever moves forward. A tempo drop shrinks how many
+        // beats scheduleAheadTime covers, so right after /clock bpm=60 the new
+        // horizon can sit *behind* what the old tempo already scheduled —
+        // and letting scheduledUpTo follow it back would re-schedule that gap
+        // on the next tick, playing every event in it twice.
+        if (horizonBeat > this.scheduledUpTo) {
+            try {
+                this._scheduleRange(this.scheduledUpTo, horizonBeat);
+            } catch (error) {
+                console.error("RibbitClock: error scheduling range, skipping", error);
+            }
+            this.scheduledUpTo = horizonBeat;
         }
-        this.scheduledUpTo = horizonBeat;
 
         this.timerId = setTimeout(() => this._tick(), this.lookaheadMs);
     };

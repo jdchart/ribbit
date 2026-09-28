@@ -28,6 +28,15 @@ export class RibbitCV extends RibbitModulator {
         };
     };
 
+    // Called by Ribbit.removeModulator. A started source node keeps running
+    // until it's stopped — disconnecting `output` silences it but doesn't
+    // free it, so every removed CV (every /recall that drops one) would
+    // otherwise leave a live node behind.
+    dispose() {
+        this.source.stop();
+        this.source.disconnect();
+    };
+
     // Thin alias onto params.value's own AudioParam (not a second
     // implementation), so value can also be used directly as an
     // RibbitAutomationEvent target, e.g. cv1.value in a pattern-automation call.

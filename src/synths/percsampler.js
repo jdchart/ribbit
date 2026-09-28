@@ -128,17 +128,15 @@ export class RibbitPercSampler extends RibbitSynth {
                         throw new Error(`invalid samples "${value}" — expected "random" or a comma-separated list of paths served under the host's "/samples/" path`);
                     }
                     // Every entry must look like a file. This mostly catches
-                    // one specific thing: sample paths contain both "/" and
-                    // spaces, and the console's parser treats a "/" as the
-                    // start of the next command and a space as the end of a
-                    // value (see splitCommands/parseCommand), so pasting a
-                    // real path in silently truncates it to "kicks". Without
-                    // this the truncation would be accepted, 404 on load, and
-                    // report success — the one failure mode worse than an
-                    // error message.
+                    // one specific thing: sample paths contain spaces, and an
+                    // unquoted space ends a console value (see parseCommand),
+                    // so pasting a real path in unquoted silently truncates
+                    // it. Without this the truncation would be accepted, 404
+                    // on load, and report success — the one failure mode
+                    // worse than an error message.
                     const malformed = list.filter((entry) => !/\.\w+$/.test(entry));
                     if (malformed.length) {
-                        throw new Error(`invalid samples — ${malformed.map((s) => `"${s}"`).join(", ")} has no file extension. Note the console can't carry a path containing "/" or spaces, so an explicit list is really only settable from a session file; use samples=random here.`);
+                        throw new Error(`invalid samples — ${malformed.map((s) => `"${s}"`).join(", ")} has no file extension. A path containing spaces has to be quoted: samples="kicks/a b.wav,hats/c.wav".`);
                     }
                     this._setSamples(list);
                 },

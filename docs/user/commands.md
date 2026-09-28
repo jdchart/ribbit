@@ -30,9 +30,10 @@
   only ramps — see [Scheduling with `at=`](#scheduling-with-at).
 - Several commands can be typed on one line and run together, e.g.
   `/track_1 gain=0 8 /reverb wet=0.9 6b` — the line is split on each `/name`
-  it finds and every segment runs in the same call, so they schedule off the
-  same instant. (This assumes no param value contains a literal `/`, which
-  none currently do.)
+  that starts a word, and every segment runs in the same call, so they
+  schedule off the same instant. A `/` inside a value doesn't split
+  (`sample=foley/rain.wav`), and a quoted value can hold spaces too:
+  `/pad sample="foley/Hlessi - Texture 12.wav"`.
 - Every command must start with `/`; anything else is rejected without side effects.
 - A `key=` with nothing after it is an error (`missing value for "gain="`),
   not an empty value — `Number("")` would otherwise silently coerce to `0`,

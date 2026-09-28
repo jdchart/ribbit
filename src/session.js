@@ -356,9 +356,15 @@ function assertKnownTypes(ribbit, snapshot) {
     for (const data of snapshot.modulators ?? []) {
         check("modulator", ribbit.modulatorTypes, data.type, `modulator "${data.name}"`);
     }
+    // Not a type, but the same failure shape: the clock refuses a
+    // non-positive tempo or loop length, and it's set after the teardown.
+    for (const key of ["bpm", "loopLengthBeats"]) {
+        const value = snapshot.clock?.[key];
+        if (snapshot.clock && !(Number.isFinite(value) && value > 0)) problems.push(`clock: invalid ${key} "${value}"`);
+    }
 
     if (problems.length) {
-        throw new Error(`session references ${problems.length} unknown type(s):\n  ${problems.join("\n  ")}`);
+        throw new Error(`session has ${problems.length} problem(s):\n  ${problems.join("\n  ")}`);
     }
 };
 
@@ -415,7 +421,7 @@ export function loadSession(ribbit, json) {
         rename(data.name, track.name);
         track.source.active = data.active;
         applyChannelParams(track, data);
-        loadProcessors(ribbit, track, data.processors);
+        loadProcessors(ribbit, track, data.processors, rename);
         track.automation = rebuildAutomation(track, data.automation);
         for (const [key, value] of Object.entries(data.synth.params)) {
             track.source.params[key]?.set(value);
@@ -443,13 +449,24 @@ export function loadSession(ribbit, json) {
         modulator.automation = rebuildAutomation(modulator, data.automation);
     }
 
+    // One at a time, and a failure skips only that cable. Unlike a bad type
+    // (refused by assertKnownTypes before anything was torn down), a patch
+    // can only be checked against the graph built above — so by the time one
+    // fails, the old session is already gone, and throwing would leave this
+    // one half-loaded: no groups, no states, no readme.
+    const skippedPatches = [];
     for (const data of json.patches ?? []) {
-        ribbit.createPatch({
-            sourceName: resolveName(data.sourceName),
-            destName: resolveDestName(data.destName),
-            depth: data.depth,
-        });
+        try {
+            ribbit.createPatch({
+                sourceName: resolveName(data.sourceName),
+                destName: resolveDestName(data.destName),
+                depth: data.depth,
+            });
+        } catch (error) {
+            skippedPatches.push(`${data.sourceName} -> ${data.destName} (${error.message})`);
+        }
     }
+    if (skippedPatches.length) ribbit.notify(`skipped ${skippedPatches.length} patch(es) on load: ${skippedPatches.join("; ")}`);
 
     // Last, and by name: a group's members can be anything above (including
     // another group), so this is the only point at which every name it might

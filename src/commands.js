@@ -1656,7 +1656,11 @@ function isTokenBoundary(input, cursorPos) {
 function suggestCompletion(ribbit, topLevelNames, input, cursorPos) {
     if (!isTokenBoundary(input, cursorPos)) return null;
 
-    const lastSlash = input.lastIndexOf("/", cursorPos - 1);
+    // The "/" that starts the command being typed — one at the start of a
+    // token, the same rule splitCommands uses, so the slash inside a value
+    // like sample=foley/rain isn't mistaken for a new command name.
+    let lastSlash = input.lastIndexOf("/", cursorPos - 1);
+    while (lastSlash > 0 && !/\s/.test(input[lastSlash - 1])) lastSlash = input.lastIndexOf("/", lastSlash - 1);
     if (lastSlash === -1) return null;
 
     const typed = input.slice(lastSlash, cursorPos); // e.g. "/track_1 ga"
@@ -1844,6 +1848,9 @@ export function createCommandRouter(ribbit) {
                     results.push(`num_beats can't be ramped — use num_beats=<number>`);
                 } else {
                     const target = toNumber(spec, "num_beats");
+                    // The clock refuses this too, but a deferred set would
+                    // only find out inside a bare timer — see runAt.
+                    if (target <= 0) throw new Error(`invalid num_beats "${spec}" — expected a positive number`);
                     if (startTime !== undefined) {
                         scheduleAt(ribbit, startTime, () => ribbit.clock.setLoopLengthBeats(target));
                         results.push(`num_beats set to ${target} (${label})`);
@@ -2202,12 +2209,26 @@ export function createCommandRouter(ribbit) {
     // several targets can be set off together, e.g.
     // "/track_1 gain=0 8 /reverb wet=0.9 6b" runs both in the same call
     // stack (and so schedules off the same audioContext.currentTime).
-    // Assumes no param value contains a literal "/" — none currently do.
+    //
+    // A new command starts only where a "/name" begins a token — at the
+    // start of the line or after whitespace — and never inside quotes. So a
+    // value may carry a "/" (sample=foley/rain.wav), and a quoted one may
+    // carry spaces too (sample="foley/Hlessi - Texture 12.wav"): sample
+    // paths have both, and splitting on every "/" made them untypeable.
     function splitCommands(text) {
         const starts = [];
-        const commandStart = /\/[a-zA-Z_]\w*/g;
-        let match;
-        while ((match = commandStart.exec(text))) starts.push(match.index);
+        let quote = null;
+        for (let i = 0; i < text.length; i++) {
+            const ch = text[i];
+            if (quote) {
+                if (ch === "\\") i++;
+                else if (ch === quote) quote = null;
+            } else if (ch === '"' || ch === "'") {
+                quote = ch;
+            } else if (ch === "/" && (i === 0 || /\s/.test(text[i - 1])) && /[a-zA-Z_]/.test(text[i + 1] ?? "")) {
+                starts.push(i);
+            }
+        }
 
         if (starts.length <= 1) return [text.trim()].filter(Boolean);
         return starts.map((start, i) => text.slice(start, starts[i + 1] ?? text.length).trim());

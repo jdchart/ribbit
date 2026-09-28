@@ -206,15 +206,13 @@ export class RibbitGranular extends RibbitSynth {
                         this._randomize();
                         return;
                     }
-                    // Sample paths contain both "/" and spaces, and the
-                    // console's parser treats a "/" as the start of the next
-                    // command and a space as the end of a value, so pasting a
-                    // real path in truncates it to the folder name. Catching
-                    // that here is the difference between an error message and
-                    // a 404 that reports success — see the same guard on
-                    // percsampler's samples=.
+                    // Sample paths contain spaces, and an unquoted space ends
+                    // a console value, so pasting a real path in unquoted
+                    // truncates it. Catching that here is the difference
+                    // between an error message and a 404 that reports
+                    // success — see the same guard on percsampler's samples=.
                     if (!/\.\w+$/.test(text)) {
-                        throw new Error(`invalid sample "${value}" — expected "random" or a path with a file extension, served under the host's "/samples/" path. Note the console can't carry a path containing "/" or spaces, so an explicit path is really only settable from a session file; use sample=random here.`);
+                        throw new Error(`invalid sample "${value}" — expected "random" or a path with a file extension, served under the host's "/samples/" path. A path containing spaces has to be quoted: sample="foley/a b.wav".`);
                     }
                     this._setSample(text);
                 },

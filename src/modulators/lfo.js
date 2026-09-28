@@ -43,6 +43,15 @@ export class RibbitLFO extends RibbitModulator {
         };
     };
 
+    // Called by Ribbit.removeModulator. A started source node keeps running
+    // until it's stopped — disconnecting `output` silences it but doesn't
+    // free it, so every removed LFO (every /recall that drops one) would
+    // otherwise leave a live node behind.
+    dispose() {
+        this.osc.stop();
+        this.osc.disconnect();
+    };
+
     // Thin alias onto params.freq's own AudioParam (not a second
     // implementation), so freq can also be used directly as an
     // RibbitAutomationEvent target or a patch destination's raw param.

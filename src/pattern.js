@@ -135,7 +135,10 @@ export function parsePattern(raw, { source = "pattern" } = {}) {
     // silently desyncing from a `steps` count somebody forgot to update — and
     // since each lane cycles at its own length (see cellAt below), a lane
     // shorter than the pattern simply repeats rather than leaving a hole.
-    const declared = raw.steps === undefined ? null : Math.floor(Number(raw.steps));
+    // `steps` doubles as an alias for `sequence` (see above) — an array there
+    // is the notes themselves, not a count, and reading it as one made every
+    // pattern written that way fail with "invalid steps".
+    const declared = raw.steps === undefined || Array.isArray(raw.steps) ? null : Math.floor(Number(raw.steps));
     if (declared !== null && (!Number.isFinite(declared) || declared < 1)) {
         throw new Error(`${source}: invalid steps "${raw.steps}" — expected a whole number >= 1`);
     }
