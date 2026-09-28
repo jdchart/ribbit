@@ -645,6 +645,16 @@ That last line sweeps *both* destinations from one command, each scaled by
 its own patch depth — a single control moving several things at once, which
 is what patch cables are for.
 
+To play one written part on several instruments, write it into a
+`pianoroll` rather than onto a track, and patch it into each of them:
+
+```
+/add_modulator type=pianoroll name=riff length=4
+/riff set_events=0:60:0.5,0.5:63:0.5,1:67:1,2:70:0.5,3:67:1
+/patch source=riff dest=lead.notes
+/patch source=riff dest=bass.notes
+```
+
 And one modulator takes no patch at all. `randomgestures` roams the session
 by itself, picking a parameter every so often and gliding it somewhere new:
 

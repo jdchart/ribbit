@@ -236,6 +236,11 @@ resolves `degree` against the shared harmony context at trigger time, see
 [harmony.js](#harmonyjs); `RibbitSampler` treats `pitch` as a sample-slot index
 and ignores `degree` entirely).
 
+`formatEvents(list)` / `parseEvents(text)` — a whole pattern as one line,
+`beat:pitch[:duration[:velocity]]` comma-separated, pitch `d<n>` for a degree.
+The form `set_events=` takes, `events` prints, and a pianoroll saves in its
+`notes` option; `parseEvents` throws naming the bad entry.
+
 ## `harmony.js`
 
 `createHarmonyContext()` returns `{ root, scale }` (default: root `60`, a
@@ -1331,6 +1336,16 @@ generator must.
 because the voicing is a pure function with no clock state to consult — which
 the other generators' `describeState()` implementations cannot claim.
 
+## `modulators/pianoroll.js` — `RibbitPianoRoll extends RibbitModulator`
+
+A hand-written pattern that belongs to no track: `generateEvents` repeats
+`sequence` every `length` beats (skipping notes written past the end), and the
+clock delivers each note to every track patched to its `.notes` — one part,
+several instruments. The simplest generator: no seed, no state beyond the
+list. The list is `sequence`, not `events`, because the clock plays any unit's
+`events` through `trigger()`, which a modulator lacks. Persists through the
+`notes` option (event.js's one-line form); `velocity` is its only param.
+
 ## `modulators/randomgestures.js` — `RibbitRandomGestures extends RibbitModulator`
 
 The one modulator that publishes nothing and is patched nowhere: it holds
@@ -1536,7 +1551,11 @@ values and a `paramKey`), `listAutomation` (indexed, decoded),
 router knows how to talk to: `channelCommand` handles a track, a bus, or
 master (gain/pan — and a track's synth's own params/options, routed through
 the track's name — via `applyParams`/`applyOptions`, plus channel-specific
-commands: `add_event`/`events`/`remove_event=`/`clear_events`,
+commands: the pattern commands `add_event`/`events`/`remove_event=`/
+`clear_events`/`set_events=` (in `eventCommands`, which `paramObjectCommand`
+also reaches for a pianoroll — `eventHolder` is the one place that knows a
+track keeps its pattern in `source.events` on `num_beats` and a pianoroll in
+`sequence` on its own `length`), `bypass=`/`enable=` for an insert,
 `mute`/`unmute`/`solo`/`unsolo` (each accepting an explicit value too, so
 `mute=false` is `unmute`; `solo` refused on master), the automate
 family, `synth=`/`add_processor=`, and routing: `out=`/`add_send=`/
