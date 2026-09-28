@@ -1,5 +1,5 @@
 import { scheduleRamp, setInstant, scheduleAt, RibbitAutomationEvent } from "./automation.js";
-import { RibbitEvent } from "./event.js";
+import { RibbitEvent, formatEvents, parseEvents } from "./event.js";
 import { parseDegreeList } from "./harmony.js";
 import { addressableParams } from "./param.js";
 import { normalizeMembers } from "./group.js";
@@ -483,6 +483,14 @@ function compositeClaimedKeys(params) {
     return claimed;
 };
 
+// `params` minus the keys a composite command on the same line has claimed,
+// for the param setters — so `/roll add_event velocity=0.5` sets the note's
+// velocity and not also the pianoroll's velocity param. min=/max= stay: they
+// are the line's random bounds, which applyParams reads from its input.
+function unclaimed(params, claimed) {
+    return Object.fromEntries(Object.entries(params).filter(([key]) => !claimed.has(key) || key === "min" || key === "max"));
+};
+
 // The bulk `/<object> random`: draws a fresh value for every param that is
 // both flagged in and actually drawable (see RibbitParam.canRandomize), by
 // handing applyParams a synthesized "everything=random" input rather than
@@ -601,6 +609,118 @@ function removeAutomationCommand(ribbit, object, rawIndex, timing) {
     });
 };
 
+// ── Patterns ────────────────────────────────────────────────────────────
+// Two kinds of object hold an editable note pattern: a track (its synth's
+// `events`, looping on the clock's num_beats) and a pianoroll modulator (its
+// `sequence`, looping on its own length — see modulators/pianoroll.js). Both
+// take the same five commands; eventHolder is the one place that knows where
+// each keeps its list and how long its loop is.
+const EVENT_KEYS = ["add_event", "events", "remove_event", "clear_events", "set_events"];
+
+function eventHolder(ribbit, object) {
+    if (object.source && Array.isArray(object.source.events) && ribbit.tracks.includes(object)) {
+        const source = object.source;
+        return {
+            label: object.name,
+            get: () => source.events,
+            set: (list) => { source.events = list; },
+            loopLength: () => ribbit.clock.loopLengthBeats,
+            loopName: "num_beats",
+        };
+    }
+    if (Array.isArray(object.sequence)) {
+        return {
+            label: object.name,
+            get: () => object.sequence,
+            set: (list) => { object.sequence = list; },
+            loopLength: () => object.length,
+            loopName: "length",
+        };
+    }
+    return null;
+};
+
+function beyondLoopNote(holder, beats) {
+    const loop = holder.loopLength();
+    const outside = beats.filter((beat) => beat >= loop);
+    if (!outside.length) return "";
+    return ` (${outside.length === 1 ? `beat ${outside[0]} is` : `${outside.length} notes are`} beyond the ${loop}-beat loop — ${outside.length === 1 ? "it" : "they"} won't sound unless ${holder.loopName} is raised)`;
+};
+
+function eventCommands(ribbit, holder, params, timing) {
+    const results = [];
+
+    if (params.add_event) {
+        const event = new RibbitEvent({
+            beat: toNumber(params.beat ?? 0, "beat"),
+            pitch: params.pitch !== undefined ? toNumber(params.pitch, "pitch") : undefined,
+            degree: params.degree !== undefined ? toNumber(params.degree, "degree") : undefined,
+            velocity: params.velocity !== undefined ? toNumber(params.velocity, "velocity") : undefined,
+            duration: params.duration !== undefined ? toNumber(params.duration, "duration") : undefined,
+        });
+        // beat is loop-relative, so one at/past the loop length never
+        // matches a scheduling window — legal (the loop may grow later), but
+        // silent, so it deserves a heads-up.
+        const beyond = beyondLoopNote(holder, [event.beat]);
+        results.push(runAt(ribbit, timing, `event will be added to ${holder.label} at beat ${event.beat}${beyond}`, () => {
+            holder.get().push(event);
+            return `event added to ${holder.label} at beat ${event.beat}${beyond}`;
+        }));
+    }
+
+    // The whole pattern at once, in event.js's compact form — what a piano
+    // roll sends after every edit, so one gesture is one line of scrollback.
+    // Parsed before the defer, like every other value (see runAt).
+    if ("set_events" in params) {
+        const list = parseEvents(params.set_events === true ? "" : params.set_events);
+        const beyond = beyondLoopNote(holder, list.map((event) => event.beat));
+        results.push(runAt(ribbit, timing, `${holder.label} will get ${list.length} events${beyond}`, () => {
+            holder.set(list);
+            return `${holder.label}: ${list.length} event${list.length === 1 ? "" : "s"}${beyond}`;
+        }));
+    }
+
+    if (params.events) {
+        const list = holder.get();
+        results.push(list.length === 0 ? "no events" : [
+            ...list.map((event, i) => {
+                const pitch = event.degree !== undefined ? `degree=${event.degree}` : `pitch=${event.pitch}`;
+                return `${i}: beat=${event.beat} ${pitch} velocity=${event.velocity} duration=${event.duration}`;
+            }),
+            `as one line: set_events=${formatEvents(list)}`,
+        ].join("\n"));
+    }
+
+    if ("remove_event" in params) {
+        const list = holder.get();
+        const index = toNumber(params.remove_event, "remove_event");
+        if (!Number.isInteger(index) || index < 0 || index >= list.length) {
+            results.push(`no event ${params.remove_event} (see "events" for the current list)`);
+        } else {
+            // Deliberately holds the *event object*, not the index: by the
+            // time a deferred removal fires, another command may have
+            // shifted the list and index 2 could be a different note.
+            const event = list[index];
+            results.push(runAt(ribbit, timing, `event ${index} will be removed`, () => {
+                const current = holder.get();
+                const at = current.indexOf(event);
+                if (at === -1) return `event ${index} was already gone`;
+                current.splice(at, 1);
+                return `event ${index} removed`;
+            }));
+        }
+    }
+
+    if (params.clear_events) {
+        results.push(runAt(ribbit, timing, `${holder.label} events will be cleared`, () => {
+            holder.set([]);
+            return `${holder.label} events cleared`;
+        }));
+    }
+
+    return results;
+};
+
 // Builds the one-line status string for a channel (master, a track, or a
 // bus), shown both for `/track_1` with no params and inside `/tracks`/`/buses`.
 function channelSummary(channel) {
@@ -679,6 +799,7 @@ function channelHelp(ribbit, channel) {
         lines.push("  add_event beat= pitch=|degree= velocity= duration=   append a note event (all fields optional; beat defaults to 0)");
         lines.push("  events / remove_event=<n>        list this synth's events with indices / remove one by index");
         lines.push("  clear_events                     empty this synth's pattern");
+        lines.push("  set_events=<b:p:d:v,...>         replace the whole pattern in one line — beat:pitch[:duration[:velocity]], pitch d<n> for a scale degree (\"events\" prints the current one this way)");
         lines.push("  start / stop                     pause/resume this synth's transport (routing untouched)");
     }
     lines.push("  mute / unmute                    silence this channel (and its sends) without moving the fader; mute=false also unmutes");
@@ -737,7 +858,7 @@ function channelHelp(ribbit, channel) {
 const CHANNEL_COMMAND_KEYS = new Set([
     "at", "out", "add_send", "send_gain", "remove_send", "send",
     "add_event", "beat", "pitch", "degree", "velocity", "duration",
-    "events", "remove_event", "clear_events", "start", "stop", "synth",
+    "events", "remove_event", "clear_events", "set_events", "start", "stop", "synth",
     "mute", "unmute", "solo", "unsolo",
     "automate", "from", "to", "curve", "once",
     "automations", "remove_automation", "clear_automation",
@@ -766,15 +887,15 @@ function channelCommand(ribbit, channel, params) {
     // modulator, and patch uses (see applyParams) — reportUnknown: false
     // since `params` also carries channel-specific keys (add_event, start,
     // synth=, ...) that aren't rampable params at all.
-    results.push(...applyParams(ribbit, channel.params, params, timing, { reportUnknown: false }));
+    const claimed = compositeClaimedKeys(params);
+    results.push(...applyParams(ribbit, channel.params, unclaimed(params, claimed), timing, { reportUnknown: false }));
 
     // A track's synth's own params and options are addressable straight off
     // the track (/lead waveform=square) — the synth isn't an addressable
     // object of its own, so its channel is where its surface lives. Channel
     // params take precedence on a key collision (none exist today).
-    const claimed = compositeClaimedKeys(params);
     if (channel.source) {
-        results.push(...applyParams(ribbit, channel.source.params, params, timing, { reportUnknown: false }));
+        results.push(...applyParams(ribbit, channel.source.params, unclaimed(params, claimed), timing, { reportUnknown: false }));
         results.push(...applyOptions(ribbit, channel.source, params, timing, claimed));
     }
 
@@ -855,78 +976,12 @@ function channelCommand(ribbit, channel, params) {
         }
     }
 
-    if (params.add_event) {
-        if (!channel.source) {
-            results.push(`${channel.name} has no synth`);
-        } else {
-            const event = new RibbitEvent({
-                beat: toNumber(params.beat ?? 0, "beat"),
-                pitch: params.pitch !== undefined ? toNumber(params.pitch, "pitch") : undefined,
-                degree: params.degree !== undefined ? toNumber(params.degree, "degree") : undefined,
-                velocity: params.velocity !== undefined ? toNumber(params.velocity, "velocity") : undefined,
-                duration: params.duration !== undefined ? toNumber(params.duration, "duration") : undefined,
-            });
-            // beat is loop-relative, so a beat at/past the current loop
-            // length never matches a scheduling window — legal (num_beats
-            // may grow later), but silent, so it deserves a heads-up.
-            const loopLength = ribbit.clock.loopLengthBeats;
-            const beyondLoop = event.beat >= loopLength
-                ? ` (beat ${event.beat} is beyond the current ${loopLength}-beat loop — it won't sound unless num_beats is raised)`
-                : "";
-            const source = channel.source;
-            results.push(runAt(ribbit, timing, `event will be added to ${source.name} at beat ${event.beat}${beyondLoop}`, () => {
-                source.addEvent(event);
-                return `event added to ${source.name} at beat ${event.beat}${beyondLoop}`;
-            }));
-        }
-    }
-
-    if (params.events) {
-        if (!channel.source) {
-            results.push(`${channel.name} has no synth`);
-        } else if (channel.source.events.length === 0) {
-            results.push("no events");
-        } else {
-            results.push(channel.source.events.map((event, i) => {
-                const pitch = event.degree !== undefined ? `degree=${event.degree}` : `pitch=${event.pitch}`;
-                return `${i}: beat=${event.beat} ${pitch} velocity=${event.velocity} duration=${event.duration}`;
-            }).join("\n"));
-        }
-    }
-
-    if ("remove_event" in params) {
-        if (!channel.source) {
-            results.push(`${channel.name} has no synth`);
-        } else {
-            const index = toNumber(params.remove_event, "remove_event");
-            const source = channel.source;
-            if (!Number.isInteger(index) || index < 0 || index >= source.events.length) {
-                results.push(`no event ${params.remove_event} (see "events" for the current list)`);
-            } else {
-                // Deliberately holds the *event object*, not the index: by the
-                // time a deferred removal fires, another command may have
-                // shifted the list and index 2 could be a different note.
-                const event = source.events[index];
-                results.push(runAt(ribbit, timing, `event ${index} will be removed`, () => {
-                    const at = source.events.indexOf(event);
-                    if (at === -1) return `event ${index} was already gone`;
-                    source.events.splice(at, 1);
-                    return `event ${index} removed`;
-                }));
-            }
-        }
-    }
-
-    if (params.clear_events) {
-        if (!channel.source) {
-            results.push(`${channel.name} has no synth`);
-        } else {
-            const source = channel.source;
-            results.push(runAt(ribbit, timing, `${source.name} events will be cleared`, () => {
-                source.events = [];
-                return `${source.name} events cleared`;
-            }));
-        }
+    // The pattern commands (add_event, events, remove_event=, clear_events,
+    // set_events=) — shared with a pianoroll, see eventCommands.
+    if (EVENT_KEYS.some((key) => key in params)) {
+        const holder = eventHolder(ribbit, channel);
+        if (!holder) results.push(`${channel.name} has no synth`);
+        else results.push(...eventCommands(ribbit, holder, params, timing));
     }
 
     // Loop-position automation on this channel's gain/pan *and* its synth's
@@ -1133,6 +1188,11 @@ function paramObjectHelp(ribbit, object) {
     lines.push("  automate=<param> to= [from= beat= duration= curve= once]   add loop-position automation (beats, repeats every loop unless once)");
     lines.push("  automations / remove_automation=<n> / clear_automation     list (with indices) / remove one / remove all");
     lines.push("  remove_self                      remove and delete this object");
+    if (eventHolder(ribbit, object)) {
+        lines.push("  add_event beat= pitch=|degree= velocity= duration=   add a note to this pattern");
+        lines.push("  events / remove_event=<n> / clear_events            list (with indices) / remove one / remove all");
+        lines.push("  set_events=<b:p:d:v,...>         replace the whole pattern in one line (pitch d<n> = scale degree)");
+    }
     if (typeof object.generateEvents === "function") {
         lines.push(`  (this modulator generates note events — feed a synth: /patch source=${object.name} dest=<track>.notes)`);
     } else if (typeof object.onSchedule === "function") {
@@ -1156,6 +1216,8 @@ const PARAM_OBJECT_COMMAND_KEYS = new Set([
     "automate", "from", "to", "beat", "duration", "curve", "once",
     "automations", "remove_automation", "clear_automation",
     "random", "min", "max",
+    // Only meaningful on a pianoroll (see eventHolder); anything else says so.
+    "add_event", "pitch", "degree", "velocity", "events", "remove_event", "clear_events", "set_events",
 ]);
 
 // Shared by processorCommand and modulatorCommand: both are addressed by
@@ -1181,8 +1243,9 @@ function paramObjectCommand(ribbit, object, params, removeSelf) {
     }
 
     const results = warning ? [warning] : [];
-    results.push(...applyParams(ribbit, object.params, params, timing, { reportUnknown: false }));
-    results.push(...applyOptions(ribbit, object, params, timing, compositeClaimedKeys(params)));
+    const claimed = compositeClaimedKeys(params);
+    results.push(...applyParams(ribbit, object.params, unclaimed(params, claimed), timing, { reportUnknown: false }));
+    results.push(...applyOptions(ribbit, object, params, timing, claimed));
 
     if ("random" in params) {
         results.push(...randomizeAll(ribbit, object.params, params.random, timing));
@@ -1190,6 +1253,11 @@ function paramObjectCommand(ribbit, object, params, removeSelf) {
 
     if ("automate" in params) {
         results.push(...addAutomationCommand(ribbit, object, object.params, params, timing));
+    }
+    if (EVENT_KEYS.some((key) => key in params)) {
+        const holder = eventHolder(ribbit, object);
+        if (!holder) results.push(`${object.name} has no note pattern of its own`);
+        else results.push(...eventCommands(ribbit, holder, params, timing));
     }
     if (params.automations) results.push(listAutomation(object, object.params));
     if ("remove_automation" in params) results.push(removeAutomationCommand(ribbit, object, params.remove_automation, timing));
@@ -1424,7 +1492,7 @@ function patchSummary(patch) {
 // insertAtCursor/acceptSuggestion, which both understand the same "=" tail
 // convention).
 const CHANNEL_ACTION_KEYWORDS = [
-    "add_event", "events", "remove_event=", "clear_events", "start", "stop",
+    "add_event", "events", "remove_event=", "clear_events", "set_events=", "start", "stop",
     "mute", "unmute", "solo", "unsolo",
     "synth=", "add_processor=", "remove_processor=", "bypass=", "enable=", "out=", "add_send=",
     "remove_send=", "send=", "at=",
@@ -1467,6 +1535,7 @@ function paramObjectKeywordsFor(object) {
         ...paramKeywords(object.params),
         ...Object.keys(object.options ?? {}).map((key) => `${key}=`),
         ...PARAM_OBJECT_ACTION_KEYWORDS,
+        ...(Array.isArray(object.sequence) ? ["add_event", "events", "remove_event=", "clear_events", "set_events="] : []),
     ];
 };
 
@@ -1613,7 +1682,9 @@ function resolveValueCandidates(ribbit, commandName, resolvedObject, key) {
     if ((key === "remove_send" || key === "send") && resolvedObject?.sends) return resolvedObject.sends.map((s) => s.id);
     if (key === "curve") return AUTOMATION_CURVES;
     if (key === "automate" && resolvedObject?.params) return Object.keys(addressableParams(resolvedObject));
-    if (key === "remove_event" && resolvedObject?.source) return resolvedObject.source.events.map((_, i) => String(i));
+    if (key === "remove_event" && (resolvedObject?.source?.events ?? resolvedObject?.sequence)) {
+        return (resolvedObject.source?.events ?? resolvedObject.sequence).map((_, i) => String(i));
+    }
     if (key === "remove_automation" && resolvedObject?.automation) return resolvedObject.automation.map((_, i) => String(i));
 
     // An option with a declared `choices` list (a synth/lfo waveform)

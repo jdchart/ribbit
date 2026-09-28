@@ -56,8 +56,15 @@ export function resolvedSampleManifest(url = SAMPLE_MANIFEST_URL) {
 // constructor is reached from the console too (`/add_track synth=sampler
 // samples=a.wav,b.wav` passes options straight through), and used to assume
 // an array.
+//
+// An empty entry (or a null, which is how a saved percsampler records the
+// slots of a category it doesn't own) stays null: it's a placeholder that
+// keeps every later slot's index where it was, not a filename.
 export function parseSampleList(value) {
-    return (Array.isArray(value) ? value : String(value).split(",")).map((entry) => String(entry).trim());
+    return (Array.isArray(value) ? value : String(value).split(",")).map((entry) => {
+        const text = entry === null || entry === undefined ? "" : String(entry).trim();
+        return text === "" || text === "null" ? null : text;
+    });
 };
 
 // Every folder name in a manifest. Used for error messages that tell you what

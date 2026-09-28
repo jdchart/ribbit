@@ -256,6 +256,10 @@ export class RibbitClock {
                     if (event.beat >= rangeStart && event.beat < rangeEnd) {
                         const time = this.beatToTime(loopBeatStart + event.beat);
                         unit.trigger(time, event, this.secondsPerBeat);
+                        // When this synth last played a note, from either
+                        // source (see the generator branch below) — read by
+                        // a host to show a track is actually sounding notes.
+                        unit.lastEventTime = time;
                     }
                 }
 
@@ -289,6 +293,7 @@ export class RibbitClock {
                         for (const destination of unit.eventDestinations ?? []) {
                             if (destination.source?.active === false) continue;
                             destination.source?.trigger(time, event, this.secondsPerBeat);
+                            if (destination.source) destination.source.lastEventTime = time;
                             delivered = true;
                         }
                         // The AudioContext time of the latest note actually

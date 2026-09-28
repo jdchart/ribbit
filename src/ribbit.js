@@ -26,6 +26,7 @@ import { RibbitEuclidPercs } from "./modulators/euclidpercs.js";
 import { RibbitPatternVariator } from "./modulators/patternvariator.js";
 import { RibbitChorale } from "./modulators/chorale.js";
 import { RibbitRandomGestures } from "./modulators/randomgestures.js";
+import { RibbitPianoRoll } from "./modulators/pianoroll.js";
 import { RibbitPatch, RibbitEventPatch } from "./patch.js";
 import { RibbitGroup } from "./group.js";
 import { RibbitRecorder } from "./recorder.js";
@@ -71,6 +72,7 @@ const MODULATOR_TYPES = {
     patternvariator: RibbitPatternVariator,
     chorale: RibbitChorale,
     randomgestures: RibbitRandomGestures,
+    pianoroll: RibbitPianoRoll,
 };
 
 // Every name the console router dispatches before it ever looks at objects:

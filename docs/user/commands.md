@@ -151,6 +151,7 @@ answer to "why is this track quiet when its fader is up".
 | `events` | Lists the track's synth's events, one per line with an index: `0: beat=0 pitch=60 velocity=1 duration=0.25`. The index is the handle `remove_event=` takes. Not valid on master or a bus. |
 | `remove_event=<n>` | Removes one event by its `events` index. Out-of-range indices are rejected with a pointer back to `events`. Not valid on master or a bus. |
 | `clear_events` | Empties the track's synth's event list. Not valid on master or a bus. |
+| `set_events=<b:p:d:v,…>` | Replaces the whole pattern in one line: `beat:pitch[:duration[:velocity]]`, comma-separated; pitch `d<n>` is a scale degree. `events` prints the current pattern in this form too. A `pianoroll` modulator takes this and the four above. |
 | `automate=<param> to=<val> [from=] [beat=] [duration=] [curve=] [once]` | Adds **loop-position automation** on `gain` or `pan` — a ramp anchored to a beat *within the loop*, replayed every pass (unlike a one-off console ramp like `gain=0 3`, which fires once from "now"). `beat` (default 0) and `duration` (default 1) are in beats; `from` defaults to the param's current value; `curve` is `linear` (default), `exponential`, or `target`; the bare flag `once` makes it fire a single time ever instead of every loop. See [Loop automation](#loop-automation) below. |
 | `automations` | Lists this channel's automation events with indices (the handle `remove_automation=` takes). |
 | `remove_automation=<n>` / `clear_automation` | Removes one automation event by index / removes them all. |

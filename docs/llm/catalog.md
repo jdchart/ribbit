@@ -495,6 +495,22 @@ want `spread=3`, four are happy at 1.
   every chord boundary underneath the music rather than slowing the
   progression down.
 
+### `pianoroll` — `src/modulators/pianoroll.js`
+A hand-written note pattern that belongs to no track: loops on its own
+`length` and plays into every track patched to it
+(`/patch source=roll dest=<track>.notes`), so several instruments share one
+part. The simplest event generator — no randomness, no seed.
+
+- **params** — `velocity` [0..1] (scales every note)
+- **options** — `notes` (the pattern in event.js's compact form,
+  `beat:pitch:duration:velocity,…`, pitch `d<n>` for a degree — what a session
+  stores), `length` [≥0.25] beats (independent of `num_beats`)
+- **commands** — the same pattern commands a track takes: `add_event`,
+  `events`, `remove_event=`, `clear_events`, `set_events=` (see
+  `commands.js`'s `eventHolder`)
+- **note** — the pattern is `sequence`, not `events`: the clock plays any
+  unit's `events` through `trigger()`, which a modulator doesn't have
+
 ### `randomgestures` — `src/modulators/randomgestures.js`
 Roams the live session and glides random parameters to new values — a seeded,
 self-playing hand on the controls. **The only modulator that isn't patched into
@@ -616,6 +632,7 @@ worklet, and the file to copy if a type ever needs one (e.g. a sample-accurate
 | rebuilds a curve/table from a discrete setting | `saturator` (`character`), `reverb` |
 | combines existing processors rather than adding DSP | `goodenizer` (the only composite) |
 | is a continuous control source | `cv` (minimal), then `lfo` |
+| plays a hand-written pattern, shared by several tracks | `pianoroll` |
 | generates notes continuously | `randomnotes` |
 | generates a fixed, looping pattern | `markovpercs` |
 | generates from grid position | `euclidpercs` |

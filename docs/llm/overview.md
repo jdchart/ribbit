@@ -258,7 +258,7 @@ running (this is exactly what `SessionPage.svelte`'s `onMount` cleanup is for).
   a plain instant set, an option (`/rhy seed=20 at=cycle`), `/harmony root=`, a
   track's `start`/`stop`, `synth=`, routing (`out=`/`add_send=`/
   `remove_send=`), `add_processor=`/`remove_processor=`/`bypass=`/`enable=`, event editing
-  (`add_event`/`remove_event=`/`clear_events`), the `automate=` family,
+  (`add_event`/`remove_event=`/`clear_events`/`set_events=`), the `automate=` family,
   `remove_self`, `/patch`/`/unpatch`, `/save`/`/remove_state`, and
   `/start`/`/stop`. Read-only listing commands have nothing to schedule.
   **The exception is object creation** — `/add_track`, `/add_bus`,

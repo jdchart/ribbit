@@ -125,7 +125,10 @@ export class RibbitPercSampler extends RibbitSynth {
                         return;
                     }
                     const list = parseSampleList(value);
-                    if (list.length === 0 || list.some((s) => !s)) {
+                    // Empty entries are allowed — they're the placeholders a
+                    // split kit keeps for categories it doesn't own — but not
+                    // a list that's nothing but.
+                    if (list.every((s) => !s)) {
                         throw new Error(`invalid samples "${value}" — expected "random" or a comma-separated list of paths served under the host's "/samples/" path`);
                     }
                     // Every entry must look like a file. This mostly catches
@@ -135,7 +138,7 @@ export class RibbitPercSampler extends RibbitSynth {
                     // it. Without this the truncation would be accepted, 404
                     // on load, and report success — the one failure mode
                     // worse than an error message.
-                    const malformed = list.filter((entry) => !/\.\w+$/.test(entry));
+                    const malformed = list.filter((entry) => entry && !/\.\w+$/.test(entry));
                     if (malformed.length) {
                         throw new Error(`invalid samples — ${malformed.map((s) => `"${s}"`).join(", ")} has no file extension. A path containing spaces has to be quoted: samples="kicks/a b.wav,hats/c.wav".`);
                     }

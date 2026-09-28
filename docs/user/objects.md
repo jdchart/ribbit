@@ -1442,6 +1442,31 @@ The `chorale-drift` example session runs three of them at once: close sevenths
 on a `tapepad`, ninths an octave up, and a one-voice bass line, with the first
 patched into two tracks so a pad and a `karplus` sing the identical voicing.
 
+### `pianoroll` — `RibbitPianoRoll`
+
+> A hand-written note pattern that isn't tied to a track — patch it into as
+> many tracks as you like and they all play it.
+
+```
+/add_modulator type=pianoroll name=chords length=8
+/chords set_events=0:57:2,0:60:2,0:64:2,2:53:2,2:57:2,2:60:2
+/patch source=chords dest=keys.notes
+/patch source=chords dest=pad.notes
+```
+
+It takes the same pattern commands a track does — `add_event`, `events`,
+`remove_event=`, `clear_events`, `set_events=` — and loops on its own `length`
+rather than the clock's `num_beats` (a 6-beat roll against an 8-beat loop is a
+polymeter). The `set_events=` form is `beat:pitch[:duration[:velocity]]`,
+comma-separated, with `d<n>` for a scale degree. In lilypad, click its mini
+roll to edit it on a piano roll. Example: the `pianoroll-shared` session.
+
+| Constructor option | Default | Runtime | Meaning |
+|---|---|---|---|
+| `notes` | `""` | option | The pattern, in the `set_events=` form. |
+| `length` | `4` | option | Loop length in beats (≥ 0.25). |
+| `velocity` | `1` | param | Scales every note — the roll's own fader. |
+
 ### `randomgestures` — `RibbitRandomGestures`
 
 > Roams the live session and glides random parameters to new values — a

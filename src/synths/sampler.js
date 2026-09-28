@@ -19,7 +19,7 @@ export class RibbitSampler extends RibbitSynth {
         super(audioContext, { name });
         this.llm_summary = "A sample player: each event's pitch selects one of a fixed set of loaded sample slots to trigger (0 = first slot, wrapping if out of range).";
 
-        this._setSamples(parseSampleList(samples));
+        this._setSamples(parseSampleList(samples).filter(Boolean));
 
         // Runtime-settable — /drums samples=kick02.wav,hat13.wav swaps the
         // slot list live (slots empty-then-fill as each file loads, same
