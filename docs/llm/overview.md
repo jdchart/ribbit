@@ -257,7 +257,7 @@ running (this is exactly what `SessionPage.svelte`'s `onMount` cleanup is for).
   changed is rampable, and **every mutating command honors it** — a param ramp,
   a plain instant set, an option (`/rhy seed=20 at=cycle`), `/harmony root=`, a
   track's `start`/`stop`, `synth=`, routing (`out=`/`add_send=`/
-  `remove_send=`), `add_processor=`/`remove_processor=`, event editing
+  `remove_send=`), `add_processor=`/`remove_processor=`/`bypass=`/`enable=`, event editing
   (`add_event`/`remove_event=`/`clear_events`), the `automate=` family,
   `remove_self`, `/patch`/`/unpatch`, `/save`/`/remove_state`, and
   `/start`/`/stop`. Read-only listing commands have nothing to schedule.
@@ -508,7 +508,8 @@ buses, master) support `gain=`, `pan=`, `mute`/`unmute`, `solo`/`unsolo`
 (master refuses `solo`; both also take an explicit value, so `mute=false` is
 `unmute`), `add_event`, `events`,
 `remove_event=`, `clear_events`, `start`,
-`stop`, `synth=`, `add_processor=`, `remove_processor=`, `remove_self`, plus
+`stop`, `synth=`, `add_processor=`, `remove_processor=`, `bypass=`/`enable=`
+(an insert's routing bypass, by id), `remove_self`, plus
 routing: `out=<name>` (replace every current send with a single one to
 `<name>`), `add_send=<name>` (optionally `send_gain=<0-1>`, default 1 — add
 one more send without disturbing existing ones), `remove_send=<id>`, and

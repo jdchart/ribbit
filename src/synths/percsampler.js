@@ -6,6 +6,7 @@ import {
     resolvedSampleManifest,
     sampleName,
     sampleUrl,
+    parseSampleList,
 } from "../samples.js";
 
 // The categories a percussion kit is built from, in slot order. This array is
@@ -106,7 +107,7 @@ export class RibbitPercSampler extends RibbitSynth {
         // `samples` option) skips the manifest entirely and is used verbatim,
         // which is what makes a kit reproducible across a save/load. Only a
         // fresh instance rolls the dice.
-        if (samples) this._setSamples(samples);
+        if (samples) this._setSamples(parseSampleList(samples));
         else this._randomize();
 
         this.options = {
@@ -123,7 +124,7 @@ export class RibbitPercSampler extends RibbitSynth {
                         this._randomize();
                         return;
                     }
-                    const list = Array.isArray(value) ? value : String(value).split(",").map((s) => s.trim());
+                    const list = parseSampleList(value);
                     if (list.length === 0 || list.some((s) => !s)) {
                         throw new Error(`invalid samples "${value}" — expected "random" or a comma-separated list of paths served under the host's "/samples/" path`);
                     }

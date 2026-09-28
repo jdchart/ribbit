@@ -50,6 +50,16 @@ export function resolvedSampleManifest(url = SAMPLE_MANIFEST_URL) {
     return manifests.resolved(url);
 };
 
+// A sample list as either form it arrives in — an array (a session file) or
+// the comma-separated string a console value carries — as trimmed paths.
+// Shared by the sample synths' constructors and their `samples` options: the
+// constructor is reached from the console too (`/add_track synth=sampler
+// samples=a.wav,b.wav` passes options straight through), and used to assume
+// an array.
+export function parseSampleList(value) {
+    return (Array.isArray(value) ? value : String(value).split(",")).map((entry) => String(entry).trim());
+};
+
 // Every folder name in a manifest. Used for error messages that tell you what
 // you *could* have asked for.
 export function sampleFolders(manifest) {

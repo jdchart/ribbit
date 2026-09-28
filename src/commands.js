@@ -694,6 +694,7 @@ function channelHelp(ribbit, channel) {
     lines.push("  automations / remove_automation=<n> / clear_automation     list (with indices) / remove one / remove all");
     lines.push(`  add_processor=<type>             insert an effect at the end of the chain (${ribbit.processorTypes.join(", ")})`);
     lines.push("  remove_processor=<id>            remove an insert by id");
+    lines.push("  bypass=<id> / enable=<id>        route around an insert without removing it, or put it back");
     lines.push("  out=<name>                       replace every current send with a single one to <name>");
     lines.push("  add_send=<name> [send_gain=]     add another simultaneous send (default gain 1)");
     lines.push("  remove_send=<id>                 remove one send");
@@ -740,7 +741,7 @@ const CHANNEL_COMMAND_KEYS = new Set([
     "mute", "unmute", "solo", "unsolo",
     "automate", "from", "to", "curve", "once",
     "automations", "remove_automation", "clear_automation",
-    "add_processor", "remove_processor", "remove_self", "help",
+    "add_processor", "remove_processor", "bypass", "enable", "remove_self", "help",
     "random", "min", "max",
 ]);
 
@@ -1049,6 +1050,24 @@ function channelCommand(ribbit, channel, params) {
                     : `no processor "${params.remove_processor}" on ${channel.name}`
             )));
         }
+    }
+
+    // Routing bypass for one insert — the chain is rebuilt around it, so a
+    // bypassed effect costs nothing and colours nothing, and its params and
+    // automation stay exactly where they were for when it comes back. Same
+    // id handle remove_processor takes.
+    for (const [key, on] of [["bypass", false], ["enable", true]]) {
+        if (!(key in params)) continue;
+        const processor = channel.processors.find((p) => p.id === params[key]);
+        if (!processor) {
+            results.push(`no processor "${params[key]}" on ${channel.name}`);
+            continue;
+        }
+        const done = on ? "enabled" : "bypassed";
+        results.push(runAt(ribbit, timing, `${processor.name} will be ${done}`, () => {
+            channel.setProcessorActive(processor.id, on);
+            return `${processor.name} (${processor.id}) ${done}`;
+        }));
     }
 
     // See CHANNEL_COMMAND_KEYS above — reportUnknown is off for the
@@ -1407,7 +1426,7 @@ function patchSummary(patch) {
 const CHANNEL_ACTION_KEYWORDS = [
     "add_event", "events", "remove_event=", "clear_events", "start", "stop",
     "mute", "unmute", "solo", "unsolo",
-    "synth=", "add_processor=", "remove_processor=", "out=", "add_send=",
+    "synth=", "add_processor=", "remove_processor=", "bypass=", "enable=", "out=", "add_send=",
     "remove_send=", "send=", "at=",
     "automate=", "automations", "remove_automation=", "clear_automation",
     "random", "min=", "max=",
@@ -1590,7 +1609,7 @@ function resolveValueCandidates(ribbit, commandName, resolvedObject, key) {
         return [...objectNames(ribbit), ...ribbit.groups.map((g) => g.name)];
     }
     if (key === "remove_member" && resolvedObject?.members) return resolvedObject.members;
-    if (key === "remove_processor" && resolvedObject?.processors) return resolvedObject.processors.map((p) => p.id);
+    if ((key === "remove_processor" || key === "bypass" || key === "enable") && resolvedObject?.processors) return resolvedObject.processors.map((p) => p.id);
     if ((key === "remove_send" || key === "send") && resolvedObject?.sends) return resolvedObject.sends.map((s) => s.id);
     if (key === "curve") return AUTOMATION_CURVES;
     if (key === "automate" && resolvedObject?.params) return Object.keys(addressableParams(resolvedObject));

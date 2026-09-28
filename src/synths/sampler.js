@@ -1,5 +1,5 @@
 import { RibbitSynth } from "../synth.js";
-import { sampleName, sampleUrl } from "../samples.js";
+import { sampleName, sampleUrl, parseSampleList } from "../samples.js";
 
 const SAMPLE_FILES = [
     "CLAUDE - kick02.wav",
@@ -19,7 +19,7 @@ export class RibbitSampler extends RibbitSynth {
         super(audioContext, { name });
         this.llm_summary = "A sample player: each event's pitch selects one of a fixed set of loaded sample slots to trigger (0 = first slot, wrapping if out of range).";
 
-        this._setSamples(samples);
+        this._setSamples(parseSampleList(samples));
 
         // Runtime-settable — /drums samples=kick02.wav,hat13.wav swaps the
         // slot list live (slots empty-then-fill as each file loads, same
@@ -30,7 +30,7 @@ export class RibbitSampler extends RibbitSynth {
             samples: {
                 get: () => this.samples,
                 set: (value) => {
-                    const list = Array.isArray(value) ? value : String(value).split(",").map((s) => s.trim());
+                    const list = parseSampleList(value);
                     if (list.length === 0 || list.some((s) => !s)) {
                         throw new Error(`invalid samples "${value}" — expected a comma-separated list of filenames served under the host's "/samples/" path`);
                     }

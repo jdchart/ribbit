@@ -46,7 +46,7 @@ export { RibbitRecorder, RECORDER_MODES, RECORDER_BIT_DEPTHS, encodeWAV } from "
 export { positionToGain, gainToPosition } from "./taper.js";
 export { mulberry32, randomSeed } from "./random.js";
 export { parsePattern, cellAt, fetchPattern, fetchPatternManifest } from "./pattern.js";
-export { fetchSampleManifest, resolvedSampleManifest, sampleName, sampleUrl, sampleFolders } from "./samples.js";
+export { fetchSampleManifest, resolvedSampleManifest, sampleName, sampleUrl, sampleFolders, parseSampleList } from "./samples.js";
 export {
     RibbitAutomationEvent,
     scheduleAutomationEvent,
