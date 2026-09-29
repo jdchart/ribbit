@@ -1,4 +1,4 @@
-import { RibbitModulator } from "../modulator.js";
+import { RibbitModulator, refOption } from "../modulator.js";
 import { RibbitParamSources } from "../param.js";
 import { mulberry32 } from "../random.js";
 
@@ -57,17 +57,17 @@ export class RibbitDriftBank extends RibbitModulator {
                 },
                 choices: KINDS,
             },
-            bus: {
+            bus: refOption({
                 get: () => this.bus,
                 set: (value) => { this.bus = String(value).trim(); },
-            },
-            targets: {
+            }, { direction: "out" }),
+            targets: refOption({
                 get: () => this.targetNames.join(","),
                 set: (value) => {
                     this.targetNames = String(value).split(",").map((t) => t.trim()).filter(Boolean);
                     this.lanes.clear();
                 },
-            },
+            }, { direction: "out", multiple: true }),
             mode: {
                 get: () => this.mode,
                 set: (value) => {

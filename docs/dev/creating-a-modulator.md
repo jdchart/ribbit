@@ -129,6 +129,26 @@ it. Every `RibbitParam` in `this.params` (like `rate` above) already
 round-trips on its own. See
 [architecture.md](architecture.md#a-third-path-structural-reconciliation-for-recall).
 
+### Options that name other objects
+
+If an option holds the name of another object (a `trigger=`, a `targets=`
+list), declare it through `refOption` so hosts draw it as a cable and the
+console completes it from object names:
+
+```js
+import { RibbitModulator, refOption, firingOf } from "../modulator.js";
+
+this.options = {
+    // "in": the named object drives this one. "out": this one acts on it.
+    follow: refOption({ get: () => this.follow, set: (v) => { this.follow = String(v).trim(); } }, { direction: "in" }),
+};
+// ...and to react when it fires (a note, a key, an onset):
+const firing = firingOf(this.engine._resolveObject(this.follow)); // { time, velocity } | null
+```
+
+Resolve the name when you use it, not when it's set — a session loads its
+modulators before patches, and the named object can be removed and remade.
+
 ## Registering it
 
 ```js

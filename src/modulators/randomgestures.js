@@ -1,4 +1,4 @@
-import { RibbitModulator } from "../modulator.js";
+import { RibbitModulator, refOption } from "../modulator.js";
 import { RibbitParamSources, addressableParams } from "../param.js";
 import { scheduleRamp } from "../automation.js";
 import { mulberry32, randomSeed } from "../random.js";
@@ -106,10 +106,10 @@ export class RibbitRandomGestures extends RibbitModulator {
             // members (see group.js), which is the intended way to aim this:
             // /add_group name=drums members=kick,snare,hats then
             // /gest targets=drums keeps the gestures on the kit.
-            targets: {
+            targets: refOption({
                 get: () => this.targetNames.join(","),
                 set: (value) => { this.targetNames = nameList(value); },
-            },
+            }, { direction: "out", multiple: true }),
             // And, orthogonally, which *params* by name — /gest params=cutoff
             // sweeps filters and nothing else. Empty means every eligible
             // param on every object in range.

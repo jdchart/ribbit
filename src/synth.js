@@ -55,6 +55,43 @@ export class RibbitSynth {
     // connect them into `this.output`. Base implementation is a silent no-op.
     trigger(time, event, secondsPerBeat) {};
 
+    // Plays a note that can be let go of early — a held key. Returns a
+    // release(time) function, or null if the synth declined the note.
+    //
+    // Synths are one-shot: a note's length is fixed at trigger(). So the
+    // note is played at its longest (`event.duration`) through a gate of its
+    // own, and releasing fades the gate. The gate works by pointing
+    // `this.output` at it for the duration of the trigger() call — every
+    // node-graph synth builds its voice and connects it to `this.output`
+    // right there — so no synth needs to know about it. A synth whose voices
+    // live in a persistent worklet (the AE voices) never connects anything
+    // new, and so rings its full length regardless.
+    triggerHeld(time, event, secondsPerBeat) {
+        const ctx = this.audioContext;
+        const output = this.output;
+        const gate = ctx.createGain();
+        gate.connect(output);
+        this.output = gate;
+        let played;
+        try {
+            played = this.trigger(time, event, secondsPerBeat);
+        } finally {
+            this.output = output;
+        }
+        if (played === false) {
+            gate.disconnect();
+            return null;
+        }
+        let released = false;
+        return (at = ctx.currentTime, fade = 0.08) => {
+            if (released) return;
+            released = true;
+            gate.gain.setValueAtTime(1, at);
+            gate.gain.setTargetAtTime(0, at, fade / 4);
+            setTimeout(() => gate.disconnect(), Math.max(0, at - ctx.currentTime + fade * 2 + 0.1) * 1000);
+        };
+    };
+
     // Everything a subclass needs beyond `params` to fully reconstruct
     // itself (e.g. RibbitOscSynth's waveform), derived from the `options` map
     // above — the same keys are accepted back by the constructor, so

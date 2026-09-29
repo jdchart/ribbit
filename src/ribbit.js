@@ -45,6 +45,7 @@ import { RibbitTapeDrone } from "./synths/tapedrone.js";
 import { RibbitMicroSampler } from "./synths/microsampler.js";
 import { RibbitSlicer } from "./synths/slicer.js";
 import { RibbitMultiCluster } from "./synths/multicluster.js";
+import { RibbitAudioIn } from "./synths/audioin.js";
 import { RibbitLFO } from "./modulators/lfo.js";
 import { RibbitRandomNotes } from "./modulators/randomnotes.js";
 import { RibbitCV } from "./modulators/cv.js";
@@ -63,6 +64,10 @@ import { RibbitDriftBank } from "./modulators/driftbank.js";
 import { RibbitAttractor } from "./modulators/attractor.js";
 import { RibbitFBMatrix } from "./modulators/fbmatrix.js";
 import { RibbitCurveLoop } from "./modulators/curveloop.js";
+import { RibbitMidiIn } from "./modulators/midiin.js";
+import { RibbitMidiCC } from "./modulators/midicc.js";
+import { RibbitLoudness } from "./modulators/loudness.js";
+import { RibbitHardware, RibbitOutput } from "./hardware.js";
 import { RibbitPatch, RibbitEventPatch } from "./patch.js";
 import { RibbitGroup } from "./group.js";
 import { RibbitRecorder } from "./recorder.js";
@@ -129,6 +134,8 @@ const SYNTH_TYPES = {
     microsampler: RibbitMicroSampler,
     slicer: RibbitSlicer,
     multicluster: RibbitMultiCluster,
+    // Live input (mic, interface inputs) as a track — see synths/audioin.js.
+    audioin: RibbitAudioIn,
 };
 
 const MODULATOR_TYPES = {
@@ -151,6 +158,11 @@ const MODULATOR_TYPES = {
     attractor: RibbitAttractor,
     fbmatrix: RibbitFBMatrix,
     curveloop: RibbitCurveLoop,
+    // The outside world: a MIDI device's keys as notes, and the first
+    // audio analyser (an envelope follower that fires on onsets).
+    midiin: RibbitMidiIn,
+    midicc: RibbitMidiCC,
+    loudness: RibbitLoudness,
 };
 
 // Every name the console router dispatches before it ever looks at objects:
@@ -162,7 +174,7 @@ const MODULATOR_TYPES = {
 export const RESERVED_NAMES = new Set([
     "start", "stop", "add_track", "tracks", "add_bus", "buses", "clock",
     "harmony", "add_modulator", "modulators", "patch", "unpatch", "patches",
-    "add_group", "groups",
+    "add_group", "groups", "add_output", "outputs", "devices",
     "record", "stop_record", "save_record", "clear_record", "recording",
     "save", "recall", "remove_state", "states",
     "save_session", "save_json", "load_session", "load_json",
@@ -198,8 +210,16 @@ export class Ribbit {
         this.tracks = [];
         this.buses = [];
 
+        // The audio interface (see hardware.js): the output device and its
+        // channels. Master feeds `hardware.main` — hardware outputs 1-2 by
+        // default, which on a stereo device is simply "the speakers" — and
+        // /add_output makes more (outputs 3-4 of a Scarlett, say).
+        this.hardware = new RibbitHardware(this.audioContext);
+        this.hardware.main = new RibbitOutput(this.hardware, { name: "speakers", channels: [1, 2] });
+        this.outputs = [];
+
         this.master = new RibbitChannel(this.audioContext, { name: "master", engine: this });
-        this.master.connect(this.audioContext.destination, "speakers");
+        this.master.connect(this.hardware.main, "speakers");
 
         this.processors = [];
         this._processorIdCounter = 0;
@@ -351,6 +371,7 @@ export class Ribbit {
             ...this.processors.map((p) => p.name),
             ...this.modulators.map((m) => m.name),
             ...this.groups.map((g) => g.name),
+            ...this.outputs.map((o) => o.name),
         ]);
     };
 
@@ -645,6 +666,30 @@ export class Ribbit {
         return group;
     };
 
+    // Creates a named hardware output (see hardware.js's RibbitOutput): an
+    // audio destination any track or bus can send to, landing on
+    // `channels` of the interface. Registered with the clock only for its
+    // gain's automation.
+    createOutput(options = {}) {
+        const name = this._uniqueName(options.name ?? "output");
+        const output = new RibbitOutput(this.hardware, { ...options, name });
+        output.type = "output";
+        this.outputs.push(output);
+        this.clock.addUnit(output);
+        return output;
+    };
+
+    removeOutput(output) {
+        const index = this.outputs.indexOf(output);
+        if (index === -1) return false;
+        this._removePatchesReferencing(output);
+        this._removeSendsReferencing(output);
+        output.dispose();
+        this.outputs.splice(index, 1);
+        this.clock.removeUnit(output);
+        return true;
+    };
+
     removeGroup(group) {
         const index = this.groups.indexOf(group);
         if (index === -1) return false;
@@ -731,7 +776,8 @@ export class Ribbit {
         return this.tracks.find((t) => t.name === name)
             ?? this.buses.find((b) => b.name === name)
             ?? this.processors.find((p) => p.name === name)
-            ?? this.modulators.find((m) => m.name === name);
+            ?? this.modulators.find((m) => m.name === name)
+            ?? this.outputs.find((o) => o.name === name);
     };
 
     // Resolves a patch destination string "name.param" (e.g. "reverb.wet",

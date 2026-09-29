@@ -1021,7 +1021,9 @@ processor, but it never joins any channel's chain. On its own it does
 nothing audible; it only matters once patched into a parameter with
 `/patch` — see [commands.md](commands.md#modulators-and-patches).
 
-There are eight, in three shapes. `lfo` and `cv` both produce a **continuous
+There are eight here, in three shapes (plus the AE machine's, in
+[ae-machine.md](ae-machine.md), and the input/analysis ones in
+[The outside world](#the-outside-world-inputs-midi-analysis)). `lfo` and `cv` both produce a **continuous
 signal** patched into a parameter (`lfo` moves by itself, `cv` holds
 whatever you set); `randomnotes`, `markovpercs`, `euclidpercs`,
 `patternvariator` and `chorale` instead generate **discrete notes** and patch
@@ -1128,6 +1130,11 @@ slot, `probability` decides whether a note actually fires, and if so a random
 entry from `scale` becomes that note's `degree`. With the default chromatic
 harmony scale, `scale`'s numbers behave as plain semitone offsets from the
 harmony root — the default `0,2,4,5,7,9,11` is therefore a major scale.
+
+`trigger=<name>` replaces the grid: one roll (still thinned by
+`probability`) each time that object *fires* — a `loudness` onset, a
+`midiin` key, a note on some track. `/rand1 trigger=onset` turns every clap
+into a random note of the scale.
 
 ### `markovpercs` — `RibbitMarkovPercs`
 
@@ -1530,6 +1537,64 @@ One caveat about reproducibility: the seed fixes the sequence of *choices*, but
 each choice is made among whatever exists at that moment, so adding a track
 mid-take renumbers everything after it. Same session, same seed, same
 performance.
+
+## The outside world: inputs, MIDI, analysis
+
+Four types connect a session to the room. Anything that **fires** — a track
+playing a note, a generator's note, a key, an onset — can drive anything that
+listens by name: `randomnotes trigger=`, and `strike=` on `modlfo`/`attractor`.
+
+### `audioin` (synth) — `RibbitAudioIn`
+
+Live input as a track: `/add_track synth=audioin name=mic`. The browser asks
+for the microphone once; the track is silent until the stream opens.
+
+| | |
+|---|---|
+| params | `trim` [0..8] |
+| options | `device` (`default`, an id, or a name fragment), `channels` (`1`, or a pair like `1,2`), `monitor` (on/off) |
+
+It ignores notes. `monitor=off` silences the track but not what analyses or
+records it. Echo cancellation, noise suppression and auto-gain are off.
+
+### `midiin` (modulator) — `RibbitMidiIn`
+
+A MIDI keyboard as a note generator — `/patch source=keys dest=lead.notes`.
+Keys sound while held and fade over `release` on key-up; the sustain pedal
+(CC64) holds them; `length` beats caps a never-released note (and is all an
+AE worklet voice plays). Its signal output is one controller (`cc`, the mod
+wheel by default) as 0..1.
+
+| | |
+|---|---|
+| params | `length` [0.03125..64], `release` [0.005..8] s, `transpose` [-48..48] |
+| options | `device` (`any`, id, or name fragment), `channel` (0 = all, 1-16), `cc` (0-127) |
+
+### `midicc` (modulator) — `RibbitMidiCC`
+
+One knob, fader or pedal as a 0..1 signal: `/add_modulator type=midicc
+name=knob cc=74`, then patch it anywhere. `cc=pitchbend` follows the wheel.
+Fires when it crosses the middle, so a pedal can be a trigger.
+
+| | |
+|---|---|
+| params | `smooth` [0.001..2] s |
+| options | `device`, `channel`, `cc` (0-127 or `pitchbend`) |
+
+### `loudness` (modulator) — `RibbitLoudness`
+
+An envelope follower on `source=<track/bus/master/effect>`. Fires each time
+the level crosses `threshold` (dBFS) — at most once per `hold`, re-arming 6dB
+below — with louder hits giving higher velocity. Its output is a gate impulse
+(`width` seconds, `mode=gate`) or the level itself (`mode=envelope`).
+
+| | |
+|---|---|
+| params | `threshold` [-80..0], `hold` [0.01..4] s, `release` [0.005..4] s, `width` [0.001..1] s |
+| options | `source`, `mode` (gate, envelope) |
+
+The `mic-trigger` session wires it up: mic → loudness → `randomnotes
+trigger=` → a plucked string.
 
 ## Groups (`/add_group`)
 

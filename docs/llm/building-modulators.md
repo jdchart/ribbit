@@ -179,6 +179,14 @@ pattern event by event.
 
 Removing a type again later: `docs/llm/removing-types.md`.
 
+## Options that name objects
+
+Declare with `refOption(option, { direction: "in"|"out", multiple })`
+(`modulator.js`) — lilypad draws it as a dotted cable, the console completes
+it. React to a named object firing with `firingOf(object)` →
+`{ time, velocity }` (its `lastEventTime`, else its synth's). Resolve names at
+use time (`engine._resolveObject`), never cache the object.
+
 ## When the DSP needs an AudioWorklet
 
 Per-sample feedback, a nonlinearity inside a loop, or state that must keep

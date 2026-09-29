@@ -78,3 +78,26 @@ export class RibbitModulator {
         return out;
     };
 };
+
+// Marks an option as naming other objects, so a host can draw it as a
+// cable rather than leave it as text in a field (lilypad does). `direction`
+// is which way the relation runs: "in" when the named object drives this one
+// (randomnotes' trigger=, loudness' source=), "out" when this one acts on
+// the named objects (a jumper's targets=). `multiple` for a comma list.
+// Returns the option, so it wraps a declaration in place.
+export function refOption(option, { direction, multiple = false }) {
+    return { ...option, ref: { direction, multiple } };
+};
+
+// When `object` last *fired*, or null: the time (and velocity, when it knows
+// one) of its latest event. A generator or analyser stamps its own
+// (lastEventTime/lastVelocity — a delivered note, a midiin key, a loudness
+// onset); a track's is its synth's, stamped by the clock on every note it
+// plays. This one reading is what every "follow that object" option shares —
+// randomnotes' trigger=, the worklet modulators' strike= — so anything that
+// fires can drive anything that listens, with no cable type between them.
+export function firingOf(object) {
+    const time = object?.lastEventTime ?? object?.source?.lastEventTime;
+    if (!Number.isFinite(time)) return null;
+    return { time, velocity: object.lastVelocity ?? object.source?.lastVelocity ?? 1 };
+};

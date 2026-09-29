@@ -26,7 +26,7 @@ Registered in `src/ribbit.js` (`SYNTH_TYPES` / `PROCESSOR_TYPES` /
 
 ---
 
-## Synths (23)
+## Synths (24)
 
 A synth makes sound and is owned by a track (`/add_track synth=<type>`). Its
 params and options are addressed through the track's name — the synth is not
@@ -185,6 +185,18 @@ this is the only synth where that's the intended use.
   RMS follower read at the patch's own 64-sample hop. Events in the shipped
   session use `pitch` rather than `degree` on purpose — a degree is resolved
   against `/harmony`, so moving the root would silently renumber every state.
+
+### `audioin` — `src/synths/audioin.js`
+Live audio input — a microphone or any input of an interface — as a track's
+source, so it gets a fader, inserts, sends, solo, and can be a `loudness`
+`source=`. Ignores notes (`trigger` returns false). Opens asynchronously
+(permission prompt), silent until then; `describeState` says what's live.
+Echo cancellation / noise suppression / AGC are off. `monitor=off` silences
+the track but its `analysisOutput` (pre-monitor) still feeds analysers.
+
+- **params** — `trim` [0..8]
+- **options** — `device` (name fragment or id, `default`), `channels` (`1`,
+  or a pair `1,2`; 1-based input channels), `monitor` (on/off)
 
 ### `czsynth` — `src/synths/czsynth.js`
 An emulation of the Casio CZ-101 (1984) — phase distortion, the synthesis
@@ -535,7 +547,7 @@ track into it and its audio arrives sample by sample (`breathe.key`).
 
 ---
 
-## Modulators (18)
+## Modulators (21)
 
 A control source, never in a channel's chain — it exists to be patched
 somewhere. Two distinct shapes:
@@ -543,7 +555,7 @@ somewhere. Two distinct shapes:
 - **continuous** (`lfo`, `cv`): a bipolar signal on `.output`, patched into an
   `AudioParam` via `/patch source=<mod> dest=<name.param> depth=`.
 - **event-generating** (`randomnotes`, `markovpercs`, `euclidpercs`,
-  `patternvariator`, `chorale`):
+  `patternvariator`, `chorale`, `midiin`):
   implements `generateEvents(fromBeat, toBeat)` and is patched into a track's
   reserved `.notes` destination (`/patch source=<mod> dest=<track>.notes`, no
   `depth`). Generated notes run *alongside* a synth's authored `events`, never
@@ -569,7 +581,60 @@ repeats**. Picks scale degrees, resolved against the shared harmony context at
 trigger time.
 
 - **params** — `probability` [0..1], `min_gap` [0.0625..16]
-- **options** — `scale` (comma-separated degrees)
+- **options** — `scale` (comma-separated degrees), `trigger` (a name: roll
+  once per firing of that object instead of on the `min_gap` grid; see
+  **Firing** below)
+
+### References — `refOption` in `src/modulator.js`
+An option that names other objects is declared through
+`refOption(option, { direction: "in"|"out", multiple })`: `in` = the named
+object drives this one (`trigger`, `strike`, `source`, `listen`), `out` =
+this one acts on it (`targets`, `bus`, `buses`, `shuffle`). Hosts draw these
+as cables (lilypad) and the console completes them from object names. **A new
+option that holds object names must use it.**
+
+### Firing — `firingOf` in `src/modulator.js`
+Anything with a `lastEventTime` (+ optional `lastVelocity`) *fires*: a
+track (its synth, stamped by the clock per note), a generator (per delivered
+note), `midiin` (per key), `midicc` (crossing the middle), `loudness` (per
+onset). `randomnotes trigger=` and the worklet modulators' `strike=` both
+read it, so any firing object drives any listener with no cable type.
+Polled on the clock tick (~25ms latency).
+
+### `midiin` — `src/modulators/midiin.js`
+A MIDI keyboard as a generator (`/patch source=keys dest=<track>.notes`).
+Notes are pushed on arrival (`generateEvents` returns []); only sound while
+the engine runs. Played via `RibbitSynth.triggerHeld` (`src/synth.js`): the
+note is triggered at `length` beats through a per-note gate, and key-up —
+deferred while the sustain pedal (CC64) is down — fades the gate over
+`release`. Works for every node-graph synth; worklet (AE) voices ignore
+release. CC123 = all notes off. `signalOutput = true`: `.output` is `cc` as
+0..1 (lilypad draws a second outlet). Device handling is `MidiListener`.
+
+- **params** — `length` [0.03125..64] beats, `release` [0.005..8] s,
+  `transpose` [-48..48]
+- **options** — `device` (`any`, id, or name fragment), `channel` (0 = all,
+  1-16), `cc` (0-127)
+
+### `midicc` — `src/modulators/midicc.js`
+One MIDI control as a continuous 0..1 signal (smoothed). Fires when it
+crosses 0.5 upwards. One per control.
+
+- **params** — `smooth` [0.001..2] s
+- **options** — `device`, `channel`, `cc` (0-127 or `pitchbend`)
+
+### `loudness` — `src/modulators/loudness.js`
+Envelope follower (worklet; instant attack, `release` decay) on
+`source=<name>` — re-resolved each clock pass, so it can precede its source.
+Taps a synth's `analysisOutput` if it has one, else `.output`. Fires when
+the level crosses `threshold` dBFS (at most once per `hold`; re-arms 6dB
+below); velocity scales with how far over. Output: `mode=gate` → 1 for
+`width` s per onset, `mode=envelope` → the level. The template for further
+analysers (`signalOutput = true` + `onSchedule` re-tap).
+
+- **params** — `threshold` [-80..0] dBFS, `hold` [0.01..4] s, `release`
+  [0.005..4] s, `width` [0.001..1] s
+- **options** — `source`, `mode` (gate, envelope)
 
 ### `markovpercs` — `src/modulators/markovpercs.js`
 A first-order Markov chain over `[rest, kicks, snares, hats, percs]`, walked
@@ -748,7 +813,7 @@ deliberately no second opt-out list.
   `dice` (`now` deals, `off` returns to rot), `seed`.
 - `modlfo` (continuous, worklet) — **params** `hz` [0.01..40]. **options**
   `shape` (sine, triangle, sawup, sawdown, square, sh, drift), `sync`, `div`
-  (4bar..1/16), `strike` (a track whose notes re-roll sh/drift).
+  (4bar..1/16), `strike` (any firing object — see **Firing** — re-rolls sh/drift).
 - `attractor` (continuous, worklet) — coullet / lorenz / rossler at audio
   rate. **params** `rate` [0.001..1], `wander`. **options** `system`
   `axis` `strike` (pushes the orbit's speed).
@@ -762,6 +827,19 @@ use `onSchedule` only to post beat anchors and strikes, and set
 `signalOutput = true` so hosts don't mistake them for session-acting ones.
 
 ---
+
+## Hardware outputs — `src/hardware.js`
+
+Not a registered type. `ribbit.hardware` owns a 32-input ChannelMerger into
+`audioContext.destination`, opened to `maxChannelCount` with discrete
+interpretation, so merger input N is hardware output N. `setDevice(query)`
+uses `AudioContext.setSinkId` (Chrome 110+). Master sends to
+`hardware.main` (a `RibbitOutput`, "speakers", default 1,2). `/add_output
+name= channels=` creates more (`ribbit.outputs`, addressable, `.input`, a
+`gain` param, `channels` option); tracks/buses reach them with out=/add_send=.
+Commands: `/master device= channels=`, `/add_output`, `/outputs`, `/devices`.
+Saved in the session file's top-level `hardware` block (not in /save states;
+omitted when default).
 
 ## Groups
 
@@ -801,14 +879,19 @@ only when true) and both show in `/tracks` and on the mixer's M/S buttons.
 ## Recording
 
 `engine.recorder` (`src/recorder.js`) — not a registered type, so it has no
-params or options; three plain settings instead, carried by `/record` and
-`/recording`:
+params or options; four plain settings instead, carried by `/record` and
+`/recording` (and the host's audio panel — lilypad `toolbar/AudioPanel.svelte`,
+nllc `mixer/AudioPanel.svelte`, which also set outputs, inputs and MIDI):
 
 - `mode` — `stereo` (tap master alone, one `.wav`) or `multitrack` (tap every
   track, then every bus, then master; one `.wav` each, downloaded as a `.zip`).
-  Can't change mid-take.
-- `bits` — `32` (IEEE float, lossless, survives going over 0dBFS) or `16`
-  (PCM, half the size, clamps).
+  Or `selected`: one `.wav` per name in `sources`. Can't change mid-take.
+- `sources` — comma-separated tracks/buses/master/outputs for `selected`
+  (setting it selects that mode). An `audioin` track with `monitor=off` is
+  tapped before its monitor (its `analysisOutput`), so a silent input still
+  records.
+- `bits` — `32` (IEEE float, lossless, survives going over 0dBFS), `24` or
+  `16` (PCM, smaller, clamp).
 - `max_minutes` — safety stop, default 5. A take is raw float audio in memory.
 
 `/record` and `/stop_record` both take `at=`, which is the point of typing them

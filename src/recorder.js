@@ -7,6 +7,12 @@
 //   stereo      one tap on master's post-fader output — "what you heard".
 //   multitrack  one tap per track, per bus, and on master — the same signals
 //               a mixdown is made of, ready to drop into a DAW.
+//   selected    one tap per name in `sources` — any track, bus, master or
+//               hardware output (e.g. just the mic and master).
+//
+// A live input (an `audioin` track) with its monitor off contributes
+// silence, but recording one is nearly always about capturing the input
+// itself — so such a track is tapped before its monitor switch instead.
 //
 // The tap is deliberately post-fader/post-pan/post-mute (a channel's `output`,
 // the same node a send or a patch source reads), because that is the signal
@@ -34,13 +40,14 @@ const BLOCK_FRAMES = 4096;
 
 // The two tap layouts. Exported so the console can complete `mode=` from the
 // same list the setter validates against.
-export const RECORDER_MODES = ["stereo", "multitrack"];
+export const RECORDER_MODES = ["stereo", "multitrack", "selected"];
 
 // WAV sample formats. 32 is IEEE float (WAVE_FORMAT_IEEE_FLOAT) — lossless,
 // and unbothered by a master that runs past 0dBFS, which a live session
 // regularly does. 16 is ordinary PCM, half the file size and playable by
-// anything, at the cost of hard-clipping anything over full scale.
-export const RECORDER_BIT_DEPTHS = [16, 32];
+// anything, at the cost of hard-clipping anything over full scale. 24 is
+// PCM too, what most DAWs and interfaces default to.
+export const RECORDER_BIT_DEPTHS = [16, 24, 32];
 
 // Safety stop. A recording is a growing array of raw floats in memory with no
 // natural end — a forgotten one eats the tab. Five minutes of stereo float32
@@ -129,7 +136,7 @@ function writeString(view, offset, text) {
 function wavBytes(channels, sampleRate, bits = 32) {
     const channelCount = channels.length;
     const frames = channels[0]?.length ?? 0;
-    const bytesPerSample = bits === 16 ? 2 : 4;
+    const bytesPerSample = bits / 8;
     const blockAlign = channelCount * bytesPerSample;
     const dataBytes = frames * blockAlign;
 
@@ -141,7 +148,7 @@ function wavBytes(channels, sampleRate, bits = 32) {
     writeString(view, 8, "WAVE");
     writeString(view, 12, "fmt ");
     view.setUint32(16, 16, true);                        // fmt chunk size
-    view.setUint16(20, bits === 16 ? 1 : 3, true);       // 1 = PCM, 3 = IEEE float
+    view.setUint16(20, bits === 32 ? 3 : 1, true);       // 1 = PCM, 3 = IEEE float
     view.setUint16(22, channelCount, true);
     view.setUint32(24, sampleRate, true);
     view.setUint32(28, sampleRate * blockAlign, true);   // byte rate
@@ -160,6 +167,17 @@ function wavBytes(channels, sampleRate, bits = 32) {
                 const sample = Math.max(-1, Math.min(1, channels[c][i]));
                 view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
                 offset += 2;
+            }
+        }
+    } else if (bits === 24) {
+        for (let i = 0; i < frames; i++) {
+            for (let c = 0; c < channelCount; c++) {
+                const sample = Math.max(-1, Math.min(1, channels[c][i]));
+                const value = Math.round(sample < 0 ? sample * 0x800000 : sample * 0x7FFFFF);
+                view.setUint8(offset, value & 0xFF);
+                view.setUint8(offset + 1, (value >> 8) & 0xFF);
+                view.setUint8(offset + 2, (value >> 16) & 0xFF);
+                offset += 3;
             }
         }
     } else {
@@ -311,6 +329,8 @@ export class RibbitRecorder {
         this.mode = "stereo";
         this.bits = 32;
         this.maxMinutes = DEFAULT_MAX_MINUTES;
+        // Names tapped in "selected" mode, in file order.
+        this.sources = ["master"];
 
         this.recording = false;
 
@@ -390,6 +410,33 @@ export class RibbitRecorder {
         return this.bits;
     };
 
+    // A comma-separated list (or array) of names — tracks, buses, master,
+    // hardware outputs. Validated against what exists now; a name removed
+    // before recording starts is simply skipped then.
+    setSources(value) {
+        const names = (Array.isArray(value) ? value : String(value ?? "").split(","))
+            .map((name) => String(name).trim()).filter(Boolean);
+        if (names.length === 0) throw new Error("sources= needs at least one name");
+        const unknown = names.filter((name) => !this._tapFor(name));
+        if (unknown.length) throw new Error(`can't record ${unknown.map((n) => `"${n}"`).join(", ")} — sources are tracks, buses, master or outputs`);
+        if (this.recording) throw new Error("can't change sources while recording — /stop_record first");
+        this.sources = [...new Set(names)];
+        return this.sources.join(",");
+    };
+
+    // The node to record for one name, or null. See the class comment for
+    // why a monitor-off live input is tapped before its monitor.
+    _tapFor(name) {
+        const engine = this.engine;
+        if (name === "master") return engine.master.output;
+        const track = engine.tracks.find((t) => t.name === name);
+        if (track) return track.source.analysisOutput && track.source.monitor === false ? track.source.analysisOutput : track.output;
+        const bus = engine.buses.find((b) => b.name === name);
+        if (bus) return bus.output;
+        const output = engine.outputs?.find((o) => o.name === name);
+        return output ? output.input : null;
+    };
+
     setMaxMinutes(minutes) {
         const value = Number(minutes);
         if (!Number.isFinite(value) || value <= 0) {
@@ -427,12 +474,10 @@ export class RibbitRecorder {
     // Resolved at start(), so a take covers the session as it stood when
     // recording began — a track added halfway through isn't in it.
     _tapTargets() {
-        if (this.mode === "stereo") return [{ name: "master", channel: this.engine.master }];
-        return [
-            ...this.engine.tracks.map((track) => ({ name: track.name, channel: track })),
-            ...this.engine.buses.map((bus) => ({ name: bus.name, channel: bus })),
-            { name: "master", channel: this.engine.master },
-        ];
+        const names = this.mode === "stereo" ? ["master"]
+            : this.mode === "selected" ? this.sources
+            : [...this.engine.tracks.map((t) => t.name), ...this.engine.buses.map((b) => b.name), "master"];
+        return names.map((name) => ({ name, node: this._tapFor(name) })).filter((target) => target.node);
     };
 
     // Begins capture. Synchronous — prepare() must have resolved first (see
@@ -474,10 +519,10 @@ export class RibbitRecorder {
                 processorOptions: { channels: 2, blockFrames: BLOCK_FRAMES },
             });
 
-            const tap = { name: target.name, source: target.channel.output, node, blocks: [], frames: 0 };
+            const tap = { name: target.name, source: target.node, node, blocks: [], frames: 0 };
             node.port.onmessage = (event) => this._receive(tap, event.data);
 
-            target.channel.output.connect(node);
+            target.node.connect(node);
             node.connect(this._sink);
 
             this.take.taps.push(tap);
@@ -617,7 +662,7 @@ export class RibbitRecorder {
     // own readout. Reports projected memory alongside duration because that,
     // not time, is what the cap is really protecting.
     describe() {
-        const parts = [`mode=${this.mode}`, `bits=${this.bits}`, `max_minutes=${this.maxMinutes}`];
+        const parts = [`mode=${this.mode}`, ...(this.mode === "selected" ? [`sources=${this.sources.join(",")}`] : []), `bits=${this.bits}`, `max_minutes=${this.maxMinutes}`];
 
         if (this.recording) {
             const channels = this.take.taps.length;

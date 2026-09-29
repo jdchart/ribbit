@@ -1,4 +1,4 @@
-import { RibbitModulator } from "../modulator.js";
+import { RibbitModulator, refOption } from "../modulator.js";
 import { RibbitParamSources } from "../param.js";
 import { scheduleRamp } from "../automation.js";
 import { mulberry32, randomSeed } from "../random.js";
@@ -59,13 +59,13 @@ export class RibbitDiceJumpers extends RibbitModulator {
         this.options = {
             // Which effects the jumpers own (comma names). Empty: every
             // processor that implements jump().
-            targets: list("targetNames"),
+            targets: refOption(list("targetNames"), { direction: "out", multiple: true }),
             probs: {
                 get: () => Object.entries(this.probs).map(([k, v]) => `${k}:${v}`).join(","),
                 set: (value) => { this.probs = this._parseProbs(value); },
             },
             // markovseq name(s) whose note injections fire every jumper.
-            listen: list("listen"),
+            listen: refOption(list("listen"), { direction: "in", multiple: true }),
             seed: {
                 get: () => this.seed,
                 set: (value) => {

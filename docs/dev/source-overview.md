@@ -1386,6 +1386,44 @@ Reproducibility has one honest caveat, worth not rediscovering: the seed fixes
 the sequence of *choices*, but each choice is made among whatever exists at
 that moment, so adding a track mid-take renumbers everything after it.
 
+## `hardware.js` — `RibbitHardware` / `RibbitOutput`
+
+The audio interface. `RibbitHardware` (one per engine, `engine.hardware`)
+owns a 32-input `ChannelMergerNode` into `audioContext.destination`, which is
+opened to its `maxChannelCount` with **discrete** interpretation — so merger
+input N is hardware output N, and switching device never rewires anything
+(discrete down-mixing drops what the device lacks). `setDevice(query)` goes
+through `AudioContext.setSinkId` and re-opens the channel count.
+`RibbitOutput` is one destination on it: a forced-stereo input gain, split
+onto two merger inputs (or summed onto one, for a mono channel).
+`hardware.main` is master's, named "speakers"; `engine.outputs` are the
+addressable ones from `/add_output`. `findMediaDevice(kind, query)` matches a
+device by id or label fragment (unlocking labels with a one-off
+`getUserMedia`), shared with `audioin`.
+
+## The outside world — `synths/audioin.js`, `modulators/{midiin,midicc,loudness}.js`
+
+- **`audioin`** opens a `getUserMedia` stream (DSP-y constraints off), splits
+  it, and picks `channels` into a stereo `tap` → `monitorGain` → output.
+  `analysisOutput` is the pre-monitor tap, read by `loudness` and the
+  recorder. `trigger()` returns false. `dispose()` stops the stream tracks
+  (otherwise the browser's recording light stays on).
+- **`midiin`** pushes notes on arrival through `RibbitSynth.triggerHeld`
+  (`synth.js`): the note is triggered at `length` beats with `this.output`
+  temporarily pointed at a per-note gate, and key-up (deferred while CC64 is
+  down) fades the gate. `generateEvents` returns [] — it exists so `.notes`
+  patches accept it. `MidiListener` (device matching, hot-plug, channel
+  filter) is shared with **`midicc`**.
+- **`loudness`** is a worklet envelope follower. It re-resolves `source=` on
+  every clock pass (`onSchedule`, with `signalOutput = true`), and stamps
+  `lastEventTime`/`lastVelocity` from each onset message.
+
+Two small contracts in `modulator.js` tie these to everything else:
+**`firingOf(object)`** (when did it last fire — own `lastEventTime`, else its
+synth's) is what `randomnotes trigger=` and the worklet modulators' `strike=`
+read; **`refOption(option, { direction, multiple })`** marks an option that
+names objects, so hosts draw it as a cable and the console completes it.
+
 ## `group.js` — `RibbitGroup`
 
 A name and a list of other objects' **names**. No audio, no params, no nodes —

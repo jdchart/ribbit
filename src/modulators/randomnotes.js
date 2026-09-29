@@ -1,4 +1,4 @@
-import { RibbitModulator } from "../modulator.js";
+import { RibbitModulator, firingOf, refOption } from "../modulator.js";
 import { RibbitParamSources } from "../param.js";
 import { RibbitEvent } from "../event.js";
 import { parseDegreeList } from "../harmony.js";
@@ -19,10 +19,22 @@ import { parseDegreeList } from "../harmony.js";
 // both "how often a note *could* happen" and the hard floor on spacing
 // between notes; probability thins that grid out rather than controlling
 // density independently of it.
+//
+// **trigger=<name>** replaces the grid with another object's firings: one
+// roll (still thinned by probability) each time <name> fires — a loudness
+// onset, a midiin key, a note on some track (see firingOf). That's how a
+// clap into a mic plays a random note of the scale:
+// mic -> loudness -> randomnotes trigger= -> a synth. min_gap is unused
+// then; the trigger's own hold is the spacing. The note lands as soon as
+// the clock's next pass sees the firing (within its ~25ms tick), carrying
+// the trigger's velocity.
 export class RibbitRandomNotes extends RibbitModulator {
-    constructor(audioContext, { name = "randomnotes", probability = 0.5, min_gap = 1, scale = [0, 2, 4, 5, 7, 9, 11] } = {}) {
+    constructor(audioContext, { name = "randomnotes", probability = 0.5, min_gap = 1, scale = [0, 2, 4, 5, 7, 9, 11], trigger = "", engine = null } = {}) {
         super(audioContext, { name });
-        this.llm_summary = "Generates random note events (probability/min-gap/scale) and feeds a synth's control input via /patch dest=<track>.notes — doesn't touch manually-authored events.";
+        this.llm_summary = "Generates random note events (probability/min-gap/scale) and feeds a synth's control input via /patch dest=<track>.notes — doesn't touch manually-authored events. trigger=<name> rolls once per firing of that object (a loudness onset, a midiin key, a track's note) instead of on the min_gap grid.";
+        this.engine = engine;
+        this.trigger = String(trigger ?? "").trim();
+        this._lastTrigger = undefined;
 
         // Not an RibbitParam (a list of degrees, not a single ramp-able value)
         // but runtime-settable as an option — /rand1 scale=0,3,5,7,10 —
@@ -34,6 +46,14 @@ export class RibbitRandomNotes extends RibbitModulator {
                 get: () => this.scale,
                 set: (value) => { this.scale = parseDegreeList(value); },
             },
+            trigger: refOption({
+                get: () => this.trigger,
+                set: (value) => {
+                    this.trigger = String(value ?? "").trim();
+                    this._lastTrigger = undefined;
+                    this._nextCandidateBeat = undefined;
+                },
+            }, { direction: "in" }),
         };
 
         // probability/min_gap still ride real AudioParams purely so they get
@@ -64,9 +84,10 @@ export class RibbitRandomNotes extends RibbitModulator {
     // clock to compute a real AudioContext time), not loop-relative like a
     // synth's own authored events.
     generateEvents(fromBeat, toBeat) {
-        if (this._nextCandidateBeat === undefined) this._nextCandidateBeat = fromBeat;
-
         const probability = this.params.probability.getModulated();
+        if (this.trigger) return this._triggeredEvents(probability);
+
+        if (this._nextCandidateBeat === undefined) this._nextCandidateBeat = fromBeat;
         const minGap = this.params.min_gap.getModulated();
 
         const events = [];
@@ -80,6 +101,27 @@ export class RibbitRandomNotes extends RibbitModulator {
         return events;
     };
 
+    // One note per new firing of the trigger object, placed at the firing
+    // (or now, if that's already past): a beat just behind the lookahead
+    // window, which the clock turns straight back into that time. The first
+    // look only records where the trigger is, so an old firing from before
+    // trigger= was set doesn't play.
+    _triggeredEvents(probability) {
+        const clock = this.engine?.clock;
+        if (!clock) return [];
+        const firing = firingOf(this.engine._resolveObject(this.trigger));
+        if (this._lastTrigger === undefined) {
+            this._lastTrigger = firing?.time ?? null;
+            return [];
+        }
+        if (!firing || firing.time === this._lastTrigger) return [];
+        this._lastTrigger = firing.time;
+        if (Math.random() >= probability || this.scale.length === 0) return [];
+        const time = Math.max(firing.time, this.audioContext.currentTime);
+        const degree = this.scale[Math.floor(Math.random() * this.scale.length)];
+        return [new RibbitEvent({ beat: (time - clock.startTime) / clock.secondsPerBeat, degree, velocity: firing.velocity })];
+    };
+
     // Called by RibbitClock.start() (duck-typed, like generateEvents): a clock
     // (re)start rewinds absolute beats to 0, so the candidate cursor must
     // reseed off the first post-restart generateEvents() range — otherwise a
@@ -87,6 +129,7 @@ export class RibbitRandomNotes extends RibbitModulator {
     // generating nothing until the clock caught back up to it.
     onClockStart() {
         this._nextCandidateBeat = undefined;
+        this._lastTrigger = undefined;
     };
 
     // Called by Ribbit.removeModulator (duck-typed, like generateEvents above)

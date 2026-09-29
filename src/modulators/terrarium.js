@@ -1,4 +1,4 @@
-import { RibbitModulator } from "../modulator.js";
+import { RibbitModulator, refOption } from "../modulator.js";
 import { RibbitParamSources, addressableParams } from "../param.js";
 import { mulberry32, randomSeed } from "../random.js";
 
@@ -114,11 +114,11 @@ export class RibbitTerrarium extends RibbitModulator {
                 set: (value) => { this.holdOn = ["on", "true", "1"].includes(String(value).trim()); },
                 choices: ["on", "off"],
             },
-            targets: list("targetNames"),
-            shuffle: {
+            targets: refOption(list("targetNames"), { direction: "out", multiple: true }),
+            shuffle: refOption({
                 get: () => this.shuffleTarget,
                 set: (value) => { this.shuffleTarget = String(value).trim(); },
-            },
+            }, { direction: "out" }),
             shuffle_cols: list("shuffleColumns"),
             coupled: {
                 get: () => (this.coupled ? "on" : "off"),

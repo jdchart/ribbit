@@ -1,4 +1,4 @@
-import { RibbitModulator } from "../modulator.js";
+import { RibbitModulator, refOption } from "../modulator.js";
 import { RibbitParamSources } from "../param.js";
 import { mulberry32, randomSeed } from "../random.js";
 
@@ -59,13 +59,13 @@ export class RibbitFBMatrix extends RibbitModulator {
         this._nextDeal = null;
 
         this.options = {
-            buses: {
+            buses: refOption({
                 get: () => this.busNames.join(","),
                 set: (value) => {
                     this.busNames = String(value).split(",").map((b) => b.trim()).filter(Boolean);
                     this._teardown();
                 },
-            },
+            }, { direction: "out", multiple: true }),
             auto: {
                 get: () => (this.auto ? "on" : "off"),
                 set: (value) => { this.auto = ["on", "true", "1"].includes(String(value).trim()); },

@@ -36,7 +36,7 @@ export { RibbitParam, RibbitParamSources } from "./param.js";
 export { RibbitEvent, formatEvents, parseEvents } from "./event.js";
 export { RibbitSynth } from "./synth.js";
 export { RibbitProcessor } from "./processor.js";
-export { RibbitModulator } from "./modulator.js";
+export { RibbitModulator, firingOf, refOption } from "./modulator.js";
 export { RibbitPatch, RibbitEventPatch } from "./patch.js";
 export { RibbitGroup } from "./group.js";
 // Audio capture. The recorder is reached as `engine.recorder` in practice —
@@ -134,3 +134,12 @@ export { RibbitDriftBank } from "./modulators/driftbank.js";
 export { RibbitAttractor } from "./modulators/attractor.js";
 export { RibbitFBMatrix } from "./modulators/fbmatrix.js";
 export { RibbitCurveLoop } from "./modulators/curveloop.js";
+
+// ── The outside world ───────────────────────────────────────────────────
+// The audio interface (output device, channel-mapped outputs), live input,
+// MIDI input, and the first audio analyser.
+export { RibbitHardware, RibbitOutput, parseHardwareChannels, findMediaDevice, unlockDeviceLabels, MAX_HARDWARE_CHANNELS } from "./hardware.js";
+export { RibbitAudioIn } from "./synths/audioin.js";
+export { RibbitMidiIn, MidiListener, requestMidi, SUSTAIN_CC } from "./modulators/midiin.js";
+export { RibbitMidiCC } from "./modulators/midicc.js";
+export { RibbitLoudness, LOUDNESS_MODES } from "./modulators/loudness.js";

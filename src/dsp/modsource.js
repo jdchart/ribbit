@@ -1,4 +1,4 @@
-import { RibbitModulator } from "../modulator.js";
+import { RibbitModulator, firingOf, refOption } from "../modulator.js";
 import { WorkletNode } from "./worklet.js";
 import { buildParams } from "./spec.js";
 
@@ -13,10 +13,10 @@ import { buildParams } from "./spec.js";
 // phase lands on the grid, and follows `/clock bpm=` and `elastictempo`
 // within one scheduling pass. The worklet half is DSP.BeatClock (lib.js).
 //
-// **Strikes.** A modulator can be told to watch a track (`strike=<track>`):
-// each note that track plays is forwarded (a sample-and-hold re-rolls, an
-// attractor is pushed). It reads the `lastEventTime` the clock stamps on a
-// synth, so it needs nothing from the track but its name.
+// **Strikes.** A modulator can be told to watch another object
+// (`strike=<name>`): each time it fires is forwarded (a sample-and-hold
+// re-rolls, an attractor is pushed). A track fires on every note it plays,
+// a loudness on every onset, a midiin on every key — see firingOf.
 export class RibbitWorkletModulator extends RibbitModulator {
     constructor(audioContext, options = {}, spec) {
         super(audioContext, { name: options.name ?? spec.processor });
@@ -44,22 +44,21 @@ export class RibbitWorkletModulator extends RibbitModulator {
         this.node.post({ ...message, time: time ?? this.audioContext.currentTime });
     };
 
-    // An option naming the track whose notes strike this modulator.
+    // An option naming the object whose firings strike this modulator.
     strikeOption() {
-        return {
+        return refOption({
             get: () => this.strike,
             set: (value) => {
                 this.strike = String(value).trim();
                 this._lastStrike = null;
             },
-        };
+        }, { direction: "in" });
     };
 
     onSchedule(fromBeat, toBeat, secondsPerBeat, clock) {
         this.node.post({ type: "anchor", time: clock.beatToTime(fromBeat), beat: fromBeat, bpm: clock.bpm });
         if (!this.strike || !this.engine) return;
-        const track = this.engine._resolveObject(this.strike);
-        const at = track?.source?.lastEventTime;
+        const at = firingOf(this.engine._resolveObject(this.strike))?.time;
         if (at !== undefined && at !== this._lastStrike) {
             this._lastStrike = at;
             this.node.post({ type: "strike", time: at });

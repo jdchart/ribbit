@@ -118,11 +118,14 @@ below).
 | `/states` | Lists every saved state's name. |
 | `/save_session` (alias: `/save_json`) | Downloads the whole live session, including every saved state, as a `.json` file. The mixer's Transport bar has a "Save JSON" button that runs this same command (see [The mixer](../user/tutorial.md#the-mixer)). |
 | `/load_session` (alias: `/load_json`) | Opens a file picker and hard-rebuilds the session (tearing down everything live first) from the chosen `.json` file. The Transport bar's "Load JSON" button runs this same command. |
-| `/record [mode=] [bits=] [max_minutes=]` | Starts recording the session's audio output. Takes `at=beat`/`at=cycle`, which is the point — `/record at=cycle` starts the take on the downbeat. Any settings given are applied first (same keys as `/recording` below). See [Recording](#recording). |
+| `/record [mode=] [sources=] [bits=] [max_minutes=]` | Starts recording the session's audio output. Takes `at=beat`/`at=cycle`, which is the point — `/record at=cycle` starts the take on the downbeat. Any settings given are applied first (same keys as `/recording` below). See [Recording](#recording). |
 | `/stop_record` | Stops recording. Takes `at=` too, so `/record at=cycle` … `/stop_record at=cycle` captures a whole number of cycles. |
-| `/save_record` | Encodes the take and downloads it — one `.wav` in `stereo` mode, a `.zip` of one `.wav` per channel in `multitrack`. |
+| `/save_record` | Encodes the take and downloads it — one `.wav` for a single tap, a `.zip` of one `.wav` per channel otherwise. |
 | `/clear_record` | Discards the take and frees the memory it was holding. |
-| `/recording [mode=] [bits=] [max_minutes=]` | With no params, reports the recorder's state (`idle`, or the take's length/channel count/memory). `mode=stereo\|multitrack` picks what gets tapped, `bits=32\|16` the WAV sample format, `max_minutes=<n>` the safety stop. `/record help` prints the whole reference. |
+| `/recording [mode=] [sources=] [bits=] [max_minutes=]` | With no params, reports the recorder's state (`idle`, or the take's length/channel count/memory). `mode=stereo\|multitrack\|selected` picks what gets tapped (`sources=a,b` names what `selected` records, and selects it), `bits=32\|24\|16` the WAV sample format, `max_minutes=<n>` the safety stop. `/record help` prints the whole reference. |
+| `/devices` | Lists audio outputs, audio inputs and MIDI inputs (asks for microphone and MIDI permission the first time, so names show). See [The audio interface](#the-audio-interface). |
+| `/add_output name= channels=` | Creates a hardware output — a stereo pair (`channels=3,4`) or one channel (`channels=5`) of the output device — that tracks and buses reach with `out=`/`add_send=`. Refuses `at=`. |
+| `/outputs` | Lists the output device, its channel count, where master lands, and every output. |
 
 ## Channel commands (`/master`, or any track/bus by name)
 
@@ -163,7 +166,8 @@ answer to "why is this track quiet when its fader is up".
 | `add_processor=<type>` | Creates a new processor of `<type>` and appends it to this channel's insert chain. Returns its assigned name and id, e.g. `added reverb (p1)`. Types: `reverb`, `delay`, `compressor`, `saturator`, `tilt`, `svf`, `comb`, `limiter`, `goodenizer` (see [objects.md](objects.md)). The processor is named after its type — a second one of the same type becomes e.g. `compressor_2` — and `add_processor=` takes no name of its own. |
 | `remove_processor=<id>` | Removes the processor with that id from this channel's chain (and destroys it, along with any patch touching it). |
 | `bypass=<id>` / `enable=<id>` | Routes the chain around that insert without removing it (its params and automation are kept), or puts it back. The mixer's insert buttons and lilypad's insert headers do the same. |
-| `out=<name>` | Replaces **every** current send with a single one to `<name>` (a track, bus, or `master`), at gain 1 — see [Buses and sends](#buses-and-sends). Not available on master: its one send to the actual speakers has no addressable name, so nothing typed at the console could ever wire it back (`remove_send=` refuses that same send for the same reason — `add_send=` on master stays allowed). |
+| `out=<name>` | Replaces **every** current send with a single one to `<name>` (a track, bus, output, or `master`), at gain 1 — see [Buses and sends](#buses-and-sends). Not available on master, which always feeds the audio interface: move it with `/master channels=` / `device=` instead (`remove_send=` refuses that send too — `add_send=` on master stays allowed). |
+| `device=` / `channels=` (master only) | `device=<name fragment\|id\|default>` plays the whole session through another output device (async; quote a name with spaces); `channels=3,4` moves master's hardware outputs. See [The audio interface](#the-audio-interface). |
 | `add_send=<name> [send_gain=<0-1>]` | Adds one more send to `<name>` without disturbing existing ones (`send_gain` defaults to `1`). Returns the new send's id, e.g. `added send s2 -> bus1 (gain 0.40)`. |
 | `remove_send=<id>` | Removes one send by id, leaving the others untouched. |
 | `send=<id> [send_gain=<value>]` | With no `send_gain=`, reports that send's current destination/gain. With `send_gain=`, sets it (rampable/`at=` deferrable, like any param). |
@@ -485,10 +489,22 @@ master* as its own stereo file, all downloaded together in one `.zip`
 The mode can't be changed mid-take — the layout decides how many files the
 take has, so `/stop_record` first.
 
-**Two settings beyond the mode.** `bits=32` (the default) writes 32-bit float
+**Or just what you name.** `mode=selected` records one file per name in
+`sources=` — any tracks, buses, outputs and master. Giving `sources=` selects
+the mode by itself:
+
+```
+/record sources=mic,master bits=24
+```
+
+A live input (`audioin`) with `monitor=off` is recorded *before* its monitor
+switch — it contributes silence to the mix, but recording it is nearly always
+about capturing the input itself.
+
+**Settings beyond the mode.** `bits=32` (the default) writes 32-bit float
 WAV: lossless, and unbothered by a master that runs past 0dBFS, which a live
-session regularly does. `bits=16` writes ordinary PCM — half the size and
-playable by anything, at the cost of hard-clipping anything over full scale.
+session regularly does. `bits=24` and `bits=16` write ordinary PCM — smaller
+and playable by anything, at the cost of hard-clipping anything over full scale.
 `max_minutes=<n>` (default 5) is a safety stop: a take is raw audio held in
 memory, and a forgotten recording will eat the tab. `/recording` reports how
 much it is currently holding for that reason, and hitting the limit stops the
@@ -509,8 +525,30 @@ Four things worth knowing:
   `/load_session` doesn't clear it — save the two separately.
 
 `/record help` prints all of the above as a reference. The mixer's Transport
-bar has the same controls as buttons (see
-[The mixer](tutorial.md#the-mixer)).
+bar has the same controls as buttons, and both apps' **audio** panel sets
+mode, sources, format and the limit (see [The mixer](tutorial.md#the-mixer)).
+
+## The audio interface
+
+Outputs, inputs and MIDI are all ordinary objects and commands:
+
+```
+/devices                                  what's plugged in
+/master device=scarlett                   play through it (a fragment of its name)
+/add_output name=phones channels=3,4      another destination: outs 3-4
+/verb add_send=phones                     the reverb goes there too
+/outputs                                  where everything lands
+
+/add_track synth=audioin name=mic channels=1        a live input, as a track
+/add_modulator type=loudness name=onset source=mic  fires on each hit
+/add_modulator type=midiin name=keys                a MIDI keyboard
+/patch source=keys dest=lead.notes
+```
+
+Master always feeds the interface (outputs 1-2 unless `/master channels=`).
+An output aimed past the device's channel count is silent and says so. The
+device and outputs are saved in the session file (not in `/save` states).
+Object details: [objects.md](objects.md#the-outside-world-inputs-midi-analysis).
 
 ## Ramps
 

@@ -6,6 +6,8 @@ import { normalizeMembers } from "./group.js";
 import { RECORDER_MODES, RECORDER_BIT_DEPTHS } from "./recorder.js";
 import { RESERVED_NAMES } from "./ribbit.js";
 import { snapshotSession, sessionToJSON, loadSession, applySnapshot } from "./session.js";
+import { unlockDeviceLabels } from "./hardware.js";
+import { requestMidi } from "./modulators/midiin.js";
 
 // Coerces a raw parsed token into a number, boolean, or (quote-stripped)
 // string. Falls through to the raw string for anything else (e.g. a bare
@@ -751,7 +753,9 @@ function channelSummary(channel) {
     // it, and needs to: it picks its source recording at random, so without
     // this the only way to know what a track is actually playing is to read
     // the session file.
-    const state = channel.source?.describeState?.();
+    // Master's is where it lands on the audio interface.
+    const state = channel.source?.describeState?.()
+        ?? (channel.engine && channel === channel.engine.master ? channel.engine.hardware.main.describeState() : null);
     return `${channel.name}${state0} — ${gain} ${pan} inserts=[${inserts}] sends=[${sends}]${synth}${state ? ` ${state}` : ""}`;
 };
 
@@ -820,6 +824,10 @@ function channelHelp(ribbit, channel) {
     lines.push("  add_send=<name> [send_gain=]     add another simultaneous send (default gain 1)");
     lines.push("  remove_send=<id>                 remove one send");
     lines.push("  send=<id> [send_gain=]           report, or ramp/set, one existing send's own gain");
+    if (channel === ribbit.master) {
+        lines.push("  device=<name|default>            play through another output device — a fragment of its name, e.g. device=scarlett (see /devices)");
+        lines.push("  channels=<a,b|a>                 which hardware outputs master lands on (default 1,2); more with /add_output");
+    }
     if (channel !== ribbit.master) lines.push("  remove_self                      delete this channel");
     lines.push(`  (this channel's post-fader output can be a patch source: /patch source=${channel.name} dest=<name.param>)`);
     lines.push("  help                             show this text");
@@ -865,6 +873,8 @@ const CHANNEL_COMMAND_KEYS = new Set([
     "add_processor", "remove_processor", "bypass", "enable", "remove_self", "help",
     "random", "min", "max",
 ]);
+
+const MASTER_COMMAND_KEYS = new Set(["device", "channels"]);
 
 function channelCommand(ribbit, channel, params) {
     if (params.help) return channelHelp(ribbit, channel);
@@ -916,7 +926,7 @@ function channelCommand(ribbit, channel, params) {
         // it back. add_send= on master stays allowed (it doesn't disturb the
         // speakers send), as does remove_send= of any non-speakers send.
         if (channel === ribbit.master) {
-            results.push("master's output is fixed to the speakers — out= is not available on master");
+            results.push("master always feeds the audio interface — choose where with device= and channels= (e.g. /master channels=3,4); /add_output for more outputs");
         } else {
             // Resolved before the defer, not inside it, so a typo'd
             // destination is still a plain command error — see runAt.
@@ -952,7 +962,7 @@ function channelCommand(ribbit, channel, params) {
         const send = channel.sends.find((s) => s.id === params.remove_send);
         // Same reasoning as the out= guard above: master's speakers send is
         // the one edge the console could never recreate once severed.
-        if (send && send.destination === ribbit.audioContext.destination) {
+        if (send && send.destination === ribbit.hardware.main) {
             results.push("master's send to the speakers can't be removed");
         } else if (!send) {
             results.push(`no send "${params.remove_send}" on ${channel.name}`);
@@ -1125,6 +1135,18 @@ function channelCommand(ribbit, channel, params) {
         }));
     }
 
+    // Master's end of the audio interface (see hardware.js): which hardware
+    // channels it lands on, and which device. A device change is async (the
+    // browser opens the device), so this command then returns a promise.
+    let pendingDevice = null;
+    if (channel === ribbit.master) {
+        if ("channels" in params) {
+            ribbit.hardware.main.options.channels.set(params.channels);
+            results.push(`master ${ribbit.hardware.main.describeState()}`);
+        }
+        if ("device" in params) pendingDevice = ribbit.hardware.setDevice(params.device);
+    }
+
     // See CHANNEL_COMMAND_KEYS above — reportUnknown is off for the
     // applyParams calls (each only knows one params map), so unrecognized
     // keys are caught here instead of silently ignored. A key is known if
@@ -1137,11 +1159,13 @@ function channelCommand(ribbit, channel, params) {
         // mysteriously unknown param).
         const { name } = splitParamKey(key);
         const knownOnSynth = channel.source && (name in channel.source.params || name in channel.source.options);
-        if (!(name in channel.params) && !knownOnSynth && !CHANNEL_COMMAND_KEYS.has(key)) {
+        const knownOnMaster = channel === ribbit.master && MASTER_COMMAND_KEYS.has(key);
+        if (!(name in channel.params) && !knownOnSynth && !knownOnMaster && !CHANNEL_COMMAND_KEYS.has(key)) {
             results.push(`unknown param "${name}"`);
         }
     }
 
+    if (pendingDevice) return pendingDevice.then((line) => [...results, line].join("; "));
     return results.length ? results.join("; ") : channelSummary(channel);
 };
 
@@ -1452,6 +1476,11 @@ function applyRecorderSettings(recorder, params) {
     if ("mode" in params) results.push(`mode=${recorder.setMode(String(params.mode))}`);
     if ("bits" in params) results.push(`bits=${recorder.setBits(params.bits)}`);
     if ("max_minutes" in params) results.push(`max_minutes=${recorder.setMaxMinutes(params.max_minutes)}`);
+    // A sources= list implies the mode that uses it.
+    if ("sources" in params) {
+        results.push(`sources=${recorder.setSources(params.sources)}`);
+        if (!("mode" in params) && recorder.mode !== "selected") results.push(`mode=${recorder.setMode("selected")}`);
+    }
     return results;
 };
 
@@ -1459,16 +1488,18 @@ function recorderHelp(recorder) {
     return [
         recorder.describe(),
         ``,
-        `/record [mode=] [bits=] [max_minutes=] [at=beat|cycle]  start recording`,
+        `/record [mode=] [sources=] [bits=] [max_minutes=] [at=beat|cycle]  start recording`,
         `/stop_record [at=beat|cycle]                            stop`,
         `/save_record                                            download the take`,
         `/clear_record                                           discard the take`,
-        `/recording [mode=] [bits=] [max_minutes=]               status, or change a setting`,
+        `/recording [mode=] [sources=] [bits=] [max_minutes=]    status, or change a setting`,
         ``,
         `mode=${RECORDER_MODES.join("|")} — stereo taps master only; multitrack taps every track,`,
-        `  bus and master as its own file, downloaded together as a .zip.`,
-        `bits=${RECORDER_BIT_DEPTHS.join("|")} — 32 is float (lossless, survives going over 0dBFS); 16 is PCM`,
-        `  (half the size, clips anything over full scale).`,
+        `  bus and master as its own file, downloaded together as a .zip; selected taps sources=.`,
+        `sources=<a,b,...> — the tracks/buses/master/outputs "selected" records (setting it selects that mode).`,
+        `  A live input (audioin) with monitor=off is recorded before its monitor, so it isn't silent.`,
+        `bits=${RECORDER_BIT_DEPTHS.join("|")} — 32 is float (lossless, survives going over 0dBFS); 24 and 16 are PCM`,
+        `  (smaller, clip anything over full scale).`,
         `max_minutes=<n> — safety stop; a take is raw audio held in memory.`,
         ``,
         `Taps are post-fader, so a muted or soloed-out channel records silence.`,
@@ -1559,6 +1590,7 @@ const TOP_LEVEL_KEYWORDS = {
     harmony: ["root=", "scale=", "tuning=", "period=", "at="],
     add_modulator: ["type=", "name="],
     add_group: ["name=", "members="],
+    add_output: ["name=", "channels="],
     // min=/max= only mean anything alongside depth=random on an existing
     // patch (a patch's depth is deliberately unbounded, so a draw there has
     // no range of its own to fall back on — see RibbitParam.randomValue).
@@ -1567,9 +1599,9 @@ const TOP_LEVEL_KEYWORDS = {
     save: ["name=", "at="],
     recall: ["name=", "at="],
     remove_state: ["name=", "at="],
-    record: ["mode=", "bits=", "max_minutes=", "at=", "help"],
+    record: ["mode=", "sources=", "bits=", "max_minutes=", "at=", "help"],
     stop_record: ["at="],
-    recording: ["mode=", "bits=", "max_minutes=", "help"],
+    recording: ["mode=", "sources=", "bits=", "max_minutes=", "help"],
 };
 
 // Every name addressable as `/name`, for completing the command/object-name
@@ -1596,6 +1628,7 @@ function objectNames(ribbit) {
         ...ribbit.buses.map((b) => b.name),
         ...ribbit.processors.map((p) => p.name),
         ...ribbit.modulators.map((m) => m.name),
+        ...ribbit.outputs.map((o) => o.name),
     ];
 };
 
@@ -1609,6 +1642,7 @@ function resolveObjectFor(ribbit, name) {
         ?? ribbit.buses.find((b) => b.name === name)
         ?? ribbit.processors.find((p) => p.name === name)
         ?? ribbit.modulators.find((m) => m.name === name)
+        ?? ribbit.outputs.find((o) => o.name === name)
         // A group has no params/options/sends of its own, so every other
         // branch of resolveValueCandidates skips straight past it — it's here
         // for remove_member=, which completes from its membership.
@@ -1626,7 +1660,7 @@ function resolveKeywordsFor(ribbit, name) {
     const channel = ribbit.tracks.find((t) => t.name === name) ?? ribbit.buses.find((b) => b.name === name);
     if (channel) return channelKeywordsFor(channel);
 
-    const paramObject = ribbit.processors.find((p) => p.name === name) ?? ribbit.modulators.find((m) => m.name === name);
+    const paramObject = ribbit.processors.find((p) => p.name === name) ?? ribbit.modulators.find((m) => m.name === name) ?? ribbit.outputs.find((o) => o.name === name);
     if (paramObject) return paramObjectKeywordsFor(paramObject);
 
     // A group's own keys, plus whatever its *first* member accepts — a group
@@ -1638,7 +1672,7 @@ function resolveKeywordsFor(ribbit, name) {
     if (group) {
         const first = group.members.map((member) => resolveObjectFor(ribbit, member)).find(Boolean);
         const memberKeywords = !first ? []
-            : first.params && "gain" in first.params ? channelKeywordsFor(first)
+            : first.sends ? channelKeywordsFor(first)
             : paramObjectKeywordsFor(first);
         return [...GROUP_ACTION_KEYWORDS, ...memberKeywords];
     }
@@ -1656,6 +1690,9 @@ function resolveKeywordsFor(ribbit, name) {
 // being typed on /track_1), so id-shaped values can be scoped to it.
 function resolveValueCandidates(ribbit, commandName, resolvedObject, key) {
     if (key === "at") return ["beat", "cycle"];
+    // An option that names other objects (see refOption) completes from the
+    // object names — trigger=, source=, targets=, …
+    if ((resolvedObject?.options ?? resolvedObject?.source?.options)?.[key]?.ref) return objectNames(ribbit);
     if (key === "synth") return ribbit.synthTypes;
     if (key === "add_processor") return ribbit.processorTypes;
     if (key === "type" && commandName === "add_modulator") return ribbit.modulatorTypes;
@@ -2036,6 +2073,47 @@ export function createCommandRouter(ribbit) {
             if (ribbit.groups.length === 0) return "no groups";
             return ribbit.groups.map((group) => groupSummary(ribbit, group)).join("\n");
         },
+        // A hardware output (see hardware.js): a destination on the audio
+        // interface's channels, for tracks/buses to reach with out= or
+        // add_send= — a headphone mix on outs 3-4, a separate stem per pair.
+        add_output: refusesAt("add_output", (options) => {
+            const output = ribbit.createOutput(options);
+            return `created ${output.name} ${output.describeState()}`;
+        }),
+        outputs: () => [
+            ribbit.hardware.describe(),
+            `master ${ribbit.hardware.main.describeState()}`,
+            ...ribbit.outputs.map((output) => `${output.name} ${output.describeState()} gain=${output.params.gain.get().toFixed(2)}`),
+        ].join("\n"),
+        // What's plugged in: audio outputs (for /master device=), audio
+        // inputs (for an audioin's device=) and MIDI inputs (for a midiin's
+        // device=). Asks for microphone permission once if the browser is
+        // hiding device names, and for MIDI permission.
+        devices: async () => {
+            const lines = [];
+            if (navigator.mediaDevices?.enumerateDevices) {
+                let devices = await navigator.mediaDevices.enumerateDevices();
+                if (devices.some((d) => d.kind.startsWith("audio")) && devices.every((d) => !d.label)) {
+                    await unlockDeviceLabels();
+                    devices = await navigator.mediaDevices.enumerateDevices();
+                }
+                for (const [kind, title] of [["audiooutput", "audio outputs"], ["audioinput", "audio inputs"]]) {
+                    const list = devices.filter((d) => d.kind === kind).map((d) => `  ${d.label || d.deviceId}`);
+                    lines.push(`${title}:`, ...(list.length ? list : ["  none"]));
+                }
+            } else {
+                lines.push("audio devices: this browser can't list them");
+            }
+            try {
+                const access = await requestMidi();
+                const list = [...access.inputs.values()].map((input) => `  ${input.name}`);
+                lines.push("midi inputs:", ...(list.length ? list : ["  none"]));
+            } catch (error) {
+                lines.push(`midi inputs: unavailable (${error.message})`);
+            }
+            lines.push(ribbit.hardware.describe());
+            return lines.join("\n");
+        },
         // A patch is its own standalone thing — a "cable" from any named
         // object's raw output (a modulator, but also a track/master/processor,
         // whose signal can double as a CV source) into any other object's
@@ -2107,7 +2185,7 @@ export function createCommandRouter(ribbit) {
             const settings = applyRecorderSettings(ribbit.recorder, params);
             await ribbit.recorder.prepare();
 
-            const { help: _help, mode: _mode, bits: _bits, max_minutes: _max, ...timing } = params;
+            const { help: _help, mode: _mode, bits: _bits, max_minutes: _max, sources: _sources, ...timing } = params;
             const result = scheduled(timing, "will start recording", () => {
                 const take = ribbit.recorder.start();
                 const channels = take.taps.length;
@@ -2277,6 +2355,9 @@ export function createCommandRouter(ribbit) {
 
         const modulator = ribbit.modulators.find((m) => m.name === name);
         if (modulator) return (p) => modulatorCommand(ribbit, modulator, p);
+
+        const output = ribbit.outputs.find((o) => o.name === name);
+        if (output) return (p) => paramObjectCommand(ribbit, output, p, () => ribbit.removeOutput(output));
 
         const group = ribbit.groups.find((g) => g.name === name);
         // The second argument is the only place in this map that takes one:

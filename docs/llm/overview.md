@@ -302,7 +302,7 @@ opening any source file, and update it whenever a type is added or removed.
 
 `src/ribbit.js`:
 ```js
-const SYNTH_TYPES = { oscsynth, sampler, percsampler, karplus, granular, tapepad, chaossynth, czsynth,
+const SYNTH_TYPES = { oscsynth, sampler, percsampler, karplus, granular, tapepad, chaossynth, czsynth, audioin,
     // the AE machine (worklet): fmperc, modal, drone, noisehat, subdrum, twostring, metalbass,
     // crack, foldkick, bassdrum, bigmodal, tapedrone, microsampler, slicer, multicluster
 };
@@ -312,6 +312,7 @@ const PROCESSOR_TYPES = { reverb, delay, compressor, saturator, tilt, svf, comb,
 };
 const MODULATOR_TYPES = { lfo, randomnotes, cv, markovpercs, euclidpercs, patternvariator, chorale, randomgestures, pianoroll,
     // AE: markovseq, elastictempo, dicejumpers, terrarium, modlfo, driftbank, attractor, fbmatrix, curveloop
+    // outside world: midiin, midicc, loudness
 };
 ```
 (Each key maps to its `Ribbit<Name>` class; see `src/ribbit.js`.)
@@ -660,7 +661,8 @@ these via two buttons).
 `/stop_record` stops (both take `at=`, which is the point — a take bounded by
 cycle boundaries is a whole number of loops), `/save_record` encodes and
 downloads, `/clear_record` discards, `/recording` reports and carries the
-three settings: `mode=stereo|multitrack`, `bits=32|16`, `max_minutes=<n>`.
+four settings: `mode=stereo|multitrack|selected`, `sources=` (names for
+`selected`), `bits=32|24|16`, `max_minutes=<n>`.
 Capture is an `AudioWorkletProcessor` compiled from an inline blob URL (no
 separate asset for a bundler to special-case), one node per tap, buffering
 4096 frames and transferring `ArrayBuffer`s to the main thread. Taps read each
@@ -669,7 +671,7 @@ channel's `output` — post-fader/pan/mute. `stereo` taps master alone;
 created in one synchronous block so the files are sample-aligned. WAV is
 written here (32-bit IEEE float, or 16-bit PCM with clamping); multitrack is
 packed into a store-only ZIP written inline (CRC32 + local/central headers).
-`/record` is the only command besides `/load_session` that is **async**: the
+`/record` is async (so are `/load_session`, `/devices` and `/master device=`): the
 worklet module is awaited *before* `at=` resolves, so the deferred start
 itself is synchronous — a rejection inside a bare `scheduleAt` timer has no
 command left to report against. A take is deliberately absent from
@@ -708,8 +710,8 @@ top-level command name and `master`), so nothing can be created already
 shadowed and unaddressable. A new top-level command must be added to
 `RESERVED_NAMES` (the router `console.warn`s at build time if forgotten).
 Two related guards: `/master` refuses `out=` and refuses `remove_send=` of
-its speakers send (that edge has no addressable name, so the console could
-never wire it back), and `add_event` warns when `beat=` lands at/past the
+its send to `hardware.main` (move it with `/master channels=`/`device=` —
+see `hardware.js` and the catalog's "Hardware outputs"), and `add_event` warns when `beat=` lands at/past the
 current loop length (legal — it sounds if `num_beats` is later raised — but
 otherwise silent).
 

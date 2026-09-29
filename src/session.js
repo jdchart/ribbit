@@ -258,9 +258,49 @@ export function sessionToJSON(ribbit) {
     return {
         version: SESSION_VERSION,
         ...(ribbit.readme.length ? { readme: [...ribbit.readme] } : {}),
+        ...serializeHardware(ribbit),
         ...snapshotSession(ribbit),
         states: { ...ribbit.states },
     };
+};
+
+// The audio interface setup (see hardware.js) — the output device, master's
+// channels, and every /add_output. File-level rather than part of a /save'd
+// state: it describes the room the session plays in, not a moment of it, so
+// /recall never adds or removes an output. Omitted when it's all default, so
+// a stereo session's file is unchanged.
+function serializeHardware(ribbit) {
+    const hardware = {
+        ...(ribbit.hardware.device !== "default" ? { device: ribbit.hardware.device } : {}),
+        ...(ribbit.hardware.main.getOptions().channels !== "1,2" ? { master: ribbit.hardware.main.getOptions().channels } : {}),
+        ...(ribbit.outputs.length ? {
+            outputs: ribbit.outputs.map((output) => ({
+                name: output.name,
+                ...output.getOptions(),
+                gain: output.params.gain.get(),
+                automation: serializeAutomation(output),
+            })),
+        } : {}),
+    };
+    return Object.keys(hardware).length ? { hardware } : {};
+};
+
+// Before any bus or track, since their sends may land on an output. The
+// device is asked for but not awaited (opening one is async and may fail on
+// a machine without it — the session still loads, on the current device).
+function loadHardware(ribbit, data = {}, rename) {
+    ribbit.hardware.main.options.channels.set(data.master ?? "1,2");
+    for (const outputData of data.outputs ?? []) {
+        const output = ribbit.createOutput({ name: outputData.name, channels: outputData.channels, gain: outputData.gain });
+        rename(outputData.name, output.name);
+        output.automation = rebuildAutomation(output, outputData.automation);
+    }
+    if (data.device && data.device !== ribbit.hardware.device) {
+        ribbit.hardware.setDevice(data.device).then(
+            (line) => ribbit.notify(line),
+            (error) => ribbit.notify(`couldn't open output device "${data.device}" (${error.message}) — playing on ${ribbit.hardware.deviceLabel}`),
+        );
+    }
 };
 
 function applyChannelParams(channel, data) {
@@ -318,6 +358,7 @@ function clearSession(ribbit) {
     for (const track of [...ribbit.tracks]) ribbit.removeTrack(track);
     for (const bus of [...ribbit.buses]) ribbit.removeBus(bus);
     for (const modulator of [...ribbit.modulators]) ribbit.removeModulator(modulator);
+    for (const output of [...ribbit.outputs]) ribbit.removeOutput(output);
     for (const processor of [...ribbit.master.processors]) ribbit.removeProcessor(processor);
     // Groups own nothing, so there's nothing to tear down — but a stale one
     // would survive the load and then name objects from the previous session.
@@ -410,6 +451,8 @@ export function loadSession(ribbit, json) {
         if (dot === -1) return destName;
         return `${resolveName(destName.slice(0, dot))}${destName.slice(dot)}`;
     };
+
+    loadHardware(ribbit, json.hardware, rename);
 
     applyChannelParams(ribbit.master, json.master);
     loadProcessors(ribbit, ribbit.master, json.master.processors, rename);
