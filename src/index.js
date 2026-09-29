@@ -26,7 +26,7 @@ export { snapshotSession, sessionToJSON, loadSession, applySnapshot } from "./se
 
 // ── Harmony context ─────────────────────────────────────────────────────
 // The shared key/scale a synth resolves an event's `degree` against.
-export { createHarmonyContext, parseDegreeList, resolveDegree } from "./harmony.js";
+export { createHarmonyContext, parseDegreeList, resolveDegree, TUNINGS, parseTuning, formatTuning, quantizeToTuning } from "./harmony.js";
 
 // ── Graph primitives & extension base classes ───────────────────────────
 export { RibbitChannel } from "./channel.js";
@@ -85,3 +85,52 @@ export { RibbitPatternVariator } from "./modulators/patternvariator.js";
 export { RibbitChorale } from "./modulators/chorale.js";
 export { RibbitRandomGestures } from "./modulators/randomgestures.js";
 export { RibbitPianoRoll } from "./modulators/pianoroll.js";
+
+// ── The AE machine (docs/dev/ae-machine.md) ─────────────────────────────
+// AudioWorklet infrastructure: the processor registry/loader, the DSP
+// toolkit every processor is written against, and the three base classes.
+export { registerWorkletProcessor, loadWorklets, WorkletNode } from "./dsp/worklet.js";
+export { dspLibrary } from "./dsp/lib.js";
+export { RibbitWorkletSynth, parseSieve, LANES } from "./dsp/voice.js";
+export { RibbitWorkletProcessor, tunedDelay } from "./dsp/effect.js";
+export { RibbitWorkletModulator } from "./dsp/modsource.js";
+export { detectOnsets, sliceFeatures, kmeans, analyseSample, decodeSample } from "./dsp/analysis.js";
+// Voices.
+export { RibbitFMPerc } from "./synths/fmperc.js";
+export { RibbitModal } from "./synths/modal.js";
+export { RibbitDrone } from "./synths/drone.js";
+export { RibbitNoiseHat } from "./synths/noisehat.js";
+export { RibbitSubDrum } from "./synths/subdrum.js";
+export { RibbitTwoString } from "./synths/twostring.js";
+export { RibbitMetalBass } from "./synths/metalbass.js";
+export { RibbitCrack } from "./synths/crack.js";
+export { RibbitFoldKick } from "./synths/foldkick.js";
+export { RibbitBassDrum } from "./synths/bassdrum.js";
+export { RibbitBigModal, MATERIALS, BIGMODAL_PRESETS } from "./synths/bigmodal.js";
+export { RibbitTapeDrone } from "./synths/tapedrone.js";
+export { RibbitMicroSampler } from "./synths/microsampler.js";
+export { RibbitSlicer } from "./synths/slicer.js";
+export { RibbitMultiCluster } from "./synths/multicluster.js";
+// Effects.
+export { RibbitDeepPad } from "./processors/deeppad.js";
+export { RibbitResonators, RESONATOR_SCALES } from "./processors/resonators.js";
+export { RibbitCascade } from "./processors/cascade.js";
+export { RibbitNotverb } from "./processors/notverb.js";
+export { RibbitGlaze } from "./processors/glaze.js";
+export { RibbitDriveNet } from "./processors/drivenet.js";
+export { RibbitSpectra } from "./processors/spectra.js";
+export { RibbitLossyVerb } from "./processors/lossyverb.js";
+export { RibbitBreathe } from "./processors/breathe.js";
+export { RibbitMicroDelay } from "./processors/microdelay.js";
+export { RibbitLooper } from "./processors/looper.js";
+export { RibbitOxide, wearFinishSeconds } from "./processors/oxide.js";
+// Modulators.
+export { RibbitMarkovSeq, METRICS, SEQ_COLUMNS } from "./modulators/markovseq.js";
+export { RibbitElasticTempo } from "./modulators/elastictempo.js";
+export { RibbitDiceJumpers } from "./modulators/dicejumpers.js";
+export { RibbitTerrarium } from "./modulators/terrarium.js";
+export { RibbitModLFO, MODLFO_SHAPES } from "./modulators/modlfo.js";
+export { RibbitDriftBank } from "./modulators/driftbank.js";
+export { RibbitAttractor } from "./modulators/attractor.js";
+export { RibbitFBMatrix } from "./modulators/fbmatrix.js";
+export { RibbitCurveLoop } from "./modulators/curveloop.js";

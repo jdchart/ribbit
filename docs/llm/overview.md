@@ -302,10 +302,19 @@ opening any source file, and update it whenever a type is added or removed.
 
 `src/ribbit.js`:
 ```js
-const SYNTH_TYPES = { oscsynth: RibbitOscSynth, sampler: RibbitSampler, percsampler: RibbitPercSampler, karplus: RibbitKarplus, granular: RibbitGranular, tapepad: RibbitTapePad, chaossynth: RibbitChaosSynth, czsynth: RibbitCZSynth };
-const PROCESSOR_TYPES = { reverb: RibbitReverb, delay: RibbitDelay, compressor: RibbitCompressor, saturator: RibbitSaturator, tilt: RibbitTilt, svf: RibbitSVF, comb: RibbitComb, limiter: RibbitLimiter, goodenizer: RibbitGoodenizer };
-const MODULATOR_TYPES = { lfo: RibbitLFO, randomnotes: RibbitRandomNotes, cv: RibbitCV, markovpercs: RibbitMarkovPercs, euclidpercs: RibbitEuclidPercs, patternvariator: RibbitPatternVariator, chorale: RibbitChorale, randomgestures: RibbitRandomGestures };
+const SYNTH_TYPES = { oscsynth, sampler, percsampler, karplus, granular, tapepad, chaossynth, czsynth,
+    // the AE machine (worklet): fmperc, modal, drone, noisehat, subdrum, twostring, metalbass,
+    // crack, foldkick, bassdrum, bigmodal, tapedrone, microsampler, slicer, multicluster
+};
+const PROCESSOR_TYPES = { reverb, delay, compressor, saturator, tilt, svf, comb, limiter, goodenizer,
+    // AE: deeppad, resonators, cascade, notverb, glaze, drivenet, spectra, lossyverb, breathe,
+    // microdelay, looper, oxide
+};
+const MODULATOR_TYPES = { lfo, randomnotes, cv, markovpercs, euclidpercs, patternvariator, chorale, randomgestures, pianoroll,
+    // AE: markovseq, elastictempo, dicejumpers, terrarium, modlfo, driftbank, attractor, fbmatrix, curveloop
+};
 ```
+(Each key maps to its `Ribbit<Name>` class; see `src/ribbit.js`.)
 
 Non-base implementations live one folder down from `src/`, grouped by
 kind — `synths/oscsynth.js`, `synths/sampler.js`; `processors/reverb.js`,
@@ -347,6 +356,49 @@ server. The copies had already drifted once; there is now one.
 `docs/llm/removing-types.md`, since docs, code-comment examples, host-app demo
 routes, and saved session JSON (which stores a `.type` key that will then fail
 to load) all accumulate references over a type's life.
+
+## AudioWorklet DSP and the AE machine (`src/dsp/`, full detail: `docs/dev/worklets.md`)
+
+36 types rebuild Emiliano Pennisi's AE Machine from its manual
+(`docs/dev/ae-machine.md` is the breakdown; `docs/user/ae-machine.md` the
+guide; six `ae-*` sessions, `ae-dark` grown from a seed by `.claude/tools/ae_dark.py`). All run their DSP in AudioWorklets:
+
+- **Registry, not files.** Each processor is a factory `(Base, DSP) => class`
+  registered with `registerWorkletProcessor`; `loadWorklets(ctx)` compiles
+  every registered factory (via `toString()`) plus the `dspLibrary()` toolkit
+  into one blob-URL module per context — the recorder's technique, so hosts
+  still serve only JSON. **A factory must be self-contained** (its arguments
+  and worklet globals only). `WorkletNode` is the main-thread handle: it
+  exists before the module loads (queued messages, pre-wired gains) and
+  connects each param's `ConstantSourceNode` into the worklet `AudioParam`
+  of the same name, so ramps/`at=`/automation/patches need no per-type code.
+- **Three bases.** `RibbitWorkletSynth` (params, `lane`/`sieve`/`quant`,
+  posts `{type:"note", time, pitch, note, velocity, duration}`),
+  `RibbitWorkletProcessor` (`send(msg, time)`, `setParamAt`, optional
+  `jump(random, time, tuning)` for `dicejumpers`, a-rate params as
+  sidechains), `RibbitWorkletModulator` (beat anchors and strikes from
+  `onSchedule`; `signalOutput = true`).
+- **Declined notes.** A synth's `trigger()` may return `false`: the clock
+  then doesn't stamp `lastEventTime` (no lamp). The sieve uses it; so do
+  `multicluster` (not my family), `tapedrone` (ignores notes) and a `slicer`
+  on a lane it doesn't hear.
+- **Lanes.** `markovseq` stamps events with `lane` (1..6), `shift`,
+  `noteNorm`, `step`. A voice sieves only lane-stamped events; everything else
+  plays as usual.
+- **Free-running synths** (`tapedrone`, `slicer`) use a setter on `active` as
+  their gate — `/track stop` fades them.
+- **Session-acting AE modulators** (`dicejumpers`, `elastictempo`,
+  `terrarium`, `driftbank`, `fbmatrix`) hold `engine` like randomgestures.
+  `elastictempo` calls `clock.setBpm` every tick during an episode;
+  `fbmatrix` owns real audio nodes between buses (a DelayNode in every path
+  keeps the cycles legal); `terrarium` can call `markovseq.shuffle()`.
+- **Harmony tuning.** `harmony.tuning` (`{name, cents, period}` or null) is
+  what `quantizeToTuning` snaps `quant=on` voices to (`/harmony tuning=`);
+  `resolveDegree` ignores it. Serialized only when set.
+- **Gesture options** (`dice`, `clear`, `restart`, `fire`, `panic`, `reset`,
+  `rnd`, `clr`, `shape`, `dispatch`, and the looper's `rec`) do something when
+  set and are removed from `getOptions()` so a session load never replays
+  them.
 
 ## Patterns (`pattern.js`)
 
@@ -961,6 +1013,14 @@ and do nothing.
   built: they'd need the panner made optional/pluggable per channel, and a
   send variant that routes through a `ChannelSplitterNode`/`ChannelMergerNode`
   pair instead of straight into `destination.input`.
+
+- **The AE worklet types need a browser that allows `blob:` module URLs for
+  AudioWorklets** (every current one does; a strict CSP would need
+  `worker-src blob:`). Until the module loads (a few ms after the first
+  object), messages queue and nothing sounds; a note that arrives more than
+  50 ms late is dropped rather than played late. Each worklet sample voice
+  holds its own copy of its (≤120 s) file; `multicluster` instances hold only
+  their own family's slices.
 
 ## Detailed docs
 

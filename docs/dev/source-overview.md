@@ -255,6 +255,11 @@ accepts. Both `root` and `scale` are runtime-mutable via `/harmony`
 chord/progression logic on top is still future work. `Ribbit` constructs one
 shared instance and threads it into every synth (see
 [architecture.md](architecture.md#harmony-context)).
+It also carries an optional microtonal `tuning` (`{ name, cents, period }` or
+null): `TUNINGS` (named cent tables, Bohlen-Pierce's period is the 3:1
+twelfth), `parseTuning`/`formatTuning` for `/harmony tuning=`, and
+`quantizeToTuning(harmony, midi)`, which the AE voices' `quant` uses. With no
+tuning it snaps to `scale`; `resolveDegree` never reads it.
 
 ## `automation.js`
 
@@ -290,6 +295,10 @@ context. It registers its timer id in `ribbit._deferredTimers` (removing
 itself when it fires) so `dispose()` can cancel whatever is still in flight.
 
 ## `clock.js` — `RibbitClock`
+
+A synth's `trigger()` may return `false` — a *declined* note (the AE voices'
+sieve, `multicluster`, `tapedrone`): the clock then doesn't stamp
+`lastEventTime`, for authored events and generated ones alike.
 
 The scheduler. See [architecture.md](architecture.md#the-clock-is-a-lookahead-scheduler-over-units)
 for the full model. Key surface: `addUnit`/`removeUnit`, `start`/`stop`,
@@ -1881,6 +1890,37 @@ instance rather than holding any state of their own:
   on the same objects are still scheduled immediately (a future `AudioParam`
   value doesn't need its node connected into the graph yet at schedule time,
   only by the time it fires, which the paired `setTimeout` guarantees).
+
+## `dsp/` — AudioWorklet DSP (the AE machine)
+
+The worklet infrastructure; [worklets.md](worklets.md) is the guide.
+
+- `worklet.js` — `registerWorkletProcessor`, `loadWorklets` (every registered
+  factory `toString()`-ed into one blob module per context), `WorkletNode`
+  (main-thread handle: pre-wired gains, queued messages, param connections).
+- `lib.js` — `dspLibrary()`, stringified into the module as `DSP`: filters
+  (SVF, biquad, one-pole, resonator, allpasses), delay lines, saturation, the
+  Bessel/disc-mode physics, sample reads, `VoiceHost`, `voiceProcessor`,
+  `effectProcessor`, `TimedQueue`, `BeatClock`.
+- `spec.js` — param tables → RibbitParams + AudioParam descriptors; option
+  helpers.
+- `voice.js` / `effect.js` / `modsource.js` — the synth, processor and
+  modulator bases (lane/sieve/quant; `send`/`jump`/`tunedDelay`; beat anchors
+  and `signalOutput`).
+- `analysis.js` / `sampled.js` — decode, onsets, features, k-means (cached);
+  the `sample`/`folder` slot the three sample voices share.
+
+## The AE machine's types
+
+`synths/` fmperc, modal, drone, noisehat, subdrum, twostring, metalbass,
+crack, foldkick, bassdrum, bigmodal, tapedrone, microsampler, slicer,
+multicluster; `processors/` deeppad, resonators, cascade, notverb, glaze,
+drivenet, spectra, lossyverb, breathe, microdelay, looper, oxide;
+`modulators/` markovseq, elastictempo, dicejumpers, terrarium, modlfo,
+driftbank, attractor, fbmatrix, curveloop. Each file exports its param
+table and processor factory beside the class, and opens with the manual's
+description and the DSP chosen for it. Catalog: `docs/llm/catalog.md`;
+design record: [ae-machine.md](ae-machine.md).
 
 ## Natural-language layer (host app, not ribbit)
 

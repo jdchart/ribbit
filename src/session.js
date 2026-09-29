@@ -217,7 +217,13 @@ function serializePatch(patch) {
 export function snapshotSession(ribbit) {
     return {
         clock: { bpm: ribbit.clock.bpm, loopLengthBeats: ribbit.clock.loopLengthBeats },
-        harmony: { root: ribbit.harmony.root, scale: [...ribbit.harmony.scale] },
+        harmony: {
+            root: ribbit.harmony.root,
+            scale: [...ribbit.harmony.scale],
+            // Written only when set, so a session that never chose a tuning
+            // serializes exactly as it did before tunings existed.
+            ...(ribbit.harmony.tuning ? { tuning: { ...ribbit.harmony.tuning, cents: [...ribbit.harmony.tuning.cents] } } : {}),
+        },
         master: serializeChannel(ribbit.master, { includeSends: false }),
         buses: ribbit.buses.map(serializeBus),
         tracks: ribbit.tracks.map(serializeTrack),
@@ -383,6 +389,7 @@ export function loadSession(ribbit, json) {
     ribbit.clock.setLoopLengthBeats(json.clock.loopLengthBeats);
     ribbit.harmony.root = json.harmony.root;
     ribbit.harmony.scale = [...json.harmony.scale];
+    ribbit.harmony.tuning = json.harmony.tuning ? { ...json.harmony.tuning, cents: [...json.harmony.tuning.cents] } : null;
 
     // Every object whose requested name wasn't available, mapped to the name
     // it actually got. Ribbit._uniqueName silently de-duplicates past a
@@ -754,6 +761,7 @@ export function applySnapshot(ribbit, snapshot, { startTime, durationSeconds = 0
         scheduleAt(ribbit, t0, () => {
             ribbit.harmony.root = snapshot.harmony.root;
             ribbit.harmony.scale = [...snapshot.harmony.scale];
+            ribbit.harmony.tuning = snapshot.harmony.tuning ? { ...snapshot.harmony.tuning, cents: [...snapshot.harmony.tuning.cents] } : null;
         });
     }
 

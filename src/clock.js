@@ -255,11 +255,11 @@ export class RibbitClock {
                 for (const event of unit.events ?? []) {
                     if (event.beat >= rangeStart && event.beat < rangeEnd) {
                         const time = this.beatToTime(loopBeatStart + event.beat);
-                        unit.trigger(time, event, this.secondsPerBeat);
                         // When this synth last played a note, from either
                         // source (see the generator branch below) — read by
                         // a host to show a track is actually sounding notes.
-                        unit.lastEventTime = time;
+                        // `false` is a declined note (see below).
+                        if (unit.trigger(time, event, this.secondsPerBeat) !== false) unit.lastEventTime = time;
                     }
                 }
 
@@ -292,7 +292,13 @@ export class RibbitClock {
                         let delivered = false;
                         for (const destination of unit.eventDestinations ?? []) {
                             if (destination.source?.active === false) continue;
-                            destination.source?.trigger(time, event, this.secondsPerBeat);
+                            // A synth may *decline* a note by returning
+                            // false — the AE voices' sieve (see
+                            // dsp/voice.js), where every voice hears every
+                            // note and plays only its own. Declined isn't
+                            // delivered: no lamp, no lastEventTime.
+                            const played = destination.source?.trigger(time, event, this.secondsPerBeat);
+                            if (played === false) continue;
                             if (destination.source) destination.source.lastEventTime = time;
                             delivered = true;
                         }

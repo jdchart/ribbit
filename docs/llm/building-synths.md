@@ -211,3 +211,13 @@ length with a named constant, so a slow tempo and a long note can't allocate
 an unbounded buffer.
 
 Removing a type again later: `docs/llm/removing-types.md`.
+
+## When the DSP needs an AudioWorklet
+
+Per-sample feedback, a nonlinearity inside a loop, or state that must keep
+running (a sustaining voice, a freeze, a looper) can't be a node graph — use
+the worklet bases in `src/dsp/` (`RibbitWorkletSynth`,
+`RibbitWorkletProcessor`, `RibbitWorkletModulator`) with a param table and a
+**self-contained** processor factory. `docs/dev/worklets.md` is the guide;
+the AE machine's 36 types are the examples (`fmperc` is the smallest voice,
+`cascade` a small effect, `modlfo` a small modulator).

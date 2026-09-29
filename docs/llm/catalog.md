@@ -26,7 +26,7 @@ Registered in `src/ribbit.js` (`SYNTH_TYPES` / `PROCESSOR_TYPES` /
 
 ---
 
-## Synths (8)
+## Synths (23)
 
 A synth makes sound and is owned by a track (`/add_track synth=<type>`). Its
 params and options are addressed through the track's name — the synth is not
@@ -235,9 +235,106 @@ preset never has to reach in and rewrite them.
   **rate-to-seconds curve is fitted, not documented** — Casio never published
   it and no teardown has recovered it; `env_time` is the intended correction.
 
+
+### The AE machine's voices (15) — `src/synths/*.js`, DSP in `src/dsp/`
+
+A clean-room rebuild of Emiliano Pennisi's AE Machine from its manual (design
+record and research: `docs/dev/ae-machine.md`; user guide:
+`docs/user/ae-machine.md`). **All fifteen run in an AudioWorklet**
+(`RibbitWorkletSynth`, `src/dsp/voice.js`): params are live worklet
+AudioParams (a ramp or patch moves a ringing note; each voice decides what it
+latches at the strike), notes are posted with their exact time. Common
+options on every one: `lane` (any, 1..6) and `sieve` (`all`, `even`, `odd`,
+`<d>:<r>`) — a note stamped with a lane by `markovseq` plays only if the lane
+matches and `note mod d = r`; `trigger()` returns **false** otherwise, which
+the clock reads as *declined*. Notes with no lane (add_event, other
+generators) always play. Pitched voices add `quant` (snap to `/harmony
+tuning=`, or the scale). Defaults reproduce the manual's dispatch table.
+
+- `fmperc` — 2-op FM, separate amplitude/index envelopes. **params** `harm`
+  [0.1..16], `index` [0..50], `a_dec`/`i_dec` [1..4000] ms, `curve`
+  [-0.99..0.99], `drive`/`fold`/`down` [0..1], `pitch` [12..108], `keytrk`,
+  `n_tmbr`, `level` [0..1]. Lane 5, 4:0.
+- `modal` — 8 resonators struck by noise; five ratio sets under `material`.
+  **params** `material` `inharm` `disp` `decay` (0.02..5.5 s) `damp` `bright`
+  [0..1], `pitch` [12..108], `keytrk` `n_tmbr` `drive` `fold` `level`. 3:1.
+- `drone` — one persistent voice: 3 PolyBLEP saws → SVF (LP/BP/HP crossfade
+  `fmode` [0..2]). **params** `trig`/`rebirth` [0..100] %, `pitch` [12..96],
+  `detune` `wave` `cutoff` `res` `lfo_rt` `lfo_dp` `comb` `compand` `att` `rel`
+  [0..1], `oct` [-3..2], `drive` `level`. **options** `hold`. 4:2. The note
+  picks the pitch class, `pitch` the register.
+- `noisehat` — noise → low + two high SVF bands. **params** `low` [20..4000],
+  `hi1`/`hi2` [1000..22000] Hz, `lowq`/`hiq` [0.1..2], `mix`, `decay`
+  [5..1000] ms, `curve`, `level`. 4:3.
+- `subdrum` — falling sine + click + random-pitched spike. **params** `pitch`
+  [18..60], `chirp`, `chtime` [5..300] ms, `attack` [0..50], `decay`
+  [50..1500], `click`, `cfreq` [500..8000], `cdecay` [5..200], `spike`,
+  `sfreq` [4000..14000], `sdecay` [5..120], `drive` [1..8], `cut`
+  [200..4000], `width`, `level`. 5:4.
+- `twostring` — two coupled Karplus-Strong strings, Hermite fractional delay
+  with the loop filters' phase delay compensated (in tune within ~3 cents to
+  C7 — better than `karplus`). **params** `pitch` [12..108], `bright` `decay`
+  `pick` `stiff` `tension` `couple` `scatter` `drive` `keytrk` `n_tmbr`
+  `level` [0..1]. 6:5.
+- `metalbass` — sub sine + 4-mode metal + comb + ring mod + a shared
+  ping-pong delay (`after` hook, outlives notes). **params** `pitch` [18..60],
+  `material` `stretch` `sub_dcy` `met_dcy` `drop` `comb` `formant` `rm_mix`
+  `drive` `width` `d_time` `d_fb` `d_sprd` `d_wet` `level` [0..1]. 8:1.
+- `crack` — 1..4 noise bursts (`cracks`), tuned body, snare-wire delays.
+  **params** `cracks` `spread` `nse_dcy` `tone` `q` `body` [0..1], `pitch`
+  [40..72], `bdy_dcy` `rattle` `width` `drive` `level`. 7:3.
+- `foldkick` — oscillator + sweep + fold + sub + compressor; pitch in Hz,
+  never the note. **params** `pitch` [18..120], `chirp`, `chtime` [5..150],
+  `attack` [0..30], `punch` [0..60], `decay` [50..2500], `body` `sub` `noise`
+  `boost` `comp` `level`. **options** `wave`. Lane 6, even.
+- `bassdrum` — inharmonic non-ringing kick, per-hit variation (`vary`), a
+  rumble reverb and an LSY degradation stage on the voice sum. **params** `rvb`
+  [0..1], `tune` [30..120] Hz, `sweep` [0..4] oct, `decay` `knock` `dirt`
+  `lsy` `freq` `pack` `vary` `level`. **options** `lsy_mode`, `dice` (a
+  gesture: rerolls everything; not saved). Lane 1.
+- `bigmodal` — a struck disc solved from physics: 16 modes from Bessel zeros
+  of a stiff membrane (`dsp/lib.js` discModeTable/discFrequencies/
+  discStrike), complex one-pole modes, ring coupling, drift, grime network,
+  six Coullet attractors. **params** `morph`, `radius` [10..600] mm, `thick`
+  [0.01..20] mm, `tension` [0..20000], `stretch` [1..41], `damp_tilt`
+  [-1..1], `contact_r`, `contact_theta` [0..360], `couple` `drift` `grime`
+  `bite`, `grain` [0.1..4], `oct` [-4..2], `hit` [0..4], `mix`, `out_db`
+  [-24..12], `rate` [0.001..1], `spread` [0.2..3], `wander`. **options**
+  `mat_a`/`mat_b` (25 names in `MATERIALS`), `preset` (22 in
+  `BIGMODAL_PRESETS` — a recipe: fills what isn't given explicitly),
+  `mod_<contact_r|contact_theta|tension|couple|grime|morph>` =
+  `chaos|vel|note:<-100..100>[:run]`. `describeState()` = f1, c, f16/f1 (the
+  manual's read-outs; its mylar example reproduces exactly). Lane 6, odd.
+- `tapedrone` — free-running: a fixed chord at 432 Hz, drifting only in
+  colour. `trigger()` always declines; the **`active` setter is the gate**
+  (`/pad stop` fades over `rel`). **params** `root` [24..72], `tune` [-50..50],
+  `voices` [2..5], `spread` `drift`, `glide` [0.05..8], `wow` `flut` `wash`
+  `dark` `hiss` `breath`, `att` [0..20], `rel` [0..30], `sat` `width` `hp`
+  `level`.
+- `microsampler` — note 48 = original pitch; micro-loop engine (`mod=on`).
+  **params** `attack` [0..500], `decay` [5..5000], `start` `loop_start`
+  `loop_end`, `slices` [1..64], `chaos`, `loop_min` [1..1000], `loop_max`
+  [1..2000], `level`. **options** `sample` `folder` `mod` `loop` `vel_invert`
+  `vel_jump`. Lane 2.
+- `slicer` — a continuously looping window over an onset-sliced file
+  (`active` gates it); each accepted step relocates it. **params** `rate`
+  [-4..4], `start` `end`, `window` [0..200] ms, `declick` [0..50], `slice`,
+  `dev_slice` `dev_rate` `dev_end` `dev_window` [-1..1], `level`. **options**
+  `sample` `folder` `thresh` `min_hop` `mod`. Reads `event.noteNorm`.
+- `multicluster` — one k-means timbre family of a sliced file. Every instance
+  draws the same slice per step (hash of `seed` and the step time) and only
+  its family's plays; the worklet holds only its own family's audio.
+  **params** `rate` [0.25..4], `attack` [0..100], `release` [5..2000],
+  `level`. **options** `sample` `folder` `clusters` `cluster` `seed` `thresh`.
+
+The three sample voices share `dsp/sampled.js` (`SampleSlot`: sample/folder
+rules identical to granular's) and `dsp/analysis.js` (decode + onsets +
+features + k-means, cached per URL and setting; files cut at 120 s). They
+expose `sample`/`folder` getters so hosts can reuse granular's picker.
+
 ---
 
-## Processors (9)
+## Processors (21)
 
 An effect in a channel's insert chain (`/<channel> add_processor=<type>`).
 Addressed by its own name. No per-event trigger.
@@ -370,9 +467,75 @@ the same control on two compressors rather than two code paths.
   by default isn't one you can leave on every session. Every shipped session
   runs it this way; `drive=8 character=fold` is the other end of the box.
 
+
+### The AE machine's effects (12) — `src/processors/*.js`
+
+AudioWorklet processors (`RibbitWorkletProcessor`, `src/dsp/effect.js`):
+every param is a worklet AudioParam, so ramps and patches move the running
+DSP. Most sit on a **send bus**, fully wet (`mix` 1). An effect may implement
+`jump(random, time, tuning)` — its own idea of a musical random
+reconfiguration, called by `dicejumpers`; `tunedDelay()` turns a scale pitch
+into a delay time. A param with `rate: "a-rate"` is a **sidechain**: patch a
+track into it and its audio arrives sample by sample (`breathe.key`).
+
+- `deeppad` — 10 self-excited complex resonators + grey/wind/vinyl noise + a
+  4-line space. **On a bus**: `excite` [0..1] makes the bus input strike the
+  bank (the internal bed ducks, level-matched). **params** `pitch` [24..84],
+  `oct` [-3..2], `descent` `inharm` `partials` `sub`, `tilt` [-1..1], `spread`
+  `drift` `decay` (0.3..40 s) `erode` `grey` `wind` `vinyl` `tone` `q` `space`
+  `dist` `damp` `excite`, `att` [0.5..40] s, `sat` `hp` `level`. **options**
+  `restart` (gesture).
+- `resonators` — 4 Karplus loops driven by the input on 4 scale degrees.
+  **params** `decay` `damp` `inharm`, `root` [24..72], `prob`, `mix`.
+  **options** `scale` (pent_minor, pent_major, dorian, lydian, wholetone,
+  hirajoshi). `tuning()` is what the jumpers tune to.
+- `cascade` — delay → two-head pitch shifter → damp → resonant band → drive →
+  diffusion → back. **params** `time` [0.02..2], `shift` [-12..12], `feedback`,
+  `win` [0.01..0.2], `damp` `xfb` `spread` `reson`, `rfreq` [100..8000],
+  `drive` `morph` `mix`. Output is the shifted signal (the first repeat is
+  already transposed).
+- `notverb` — 8-line Hadamard FDN, glided line lengths. **params** `size`
+  `decay` (0.3..60 s) `damp` `mix`. **options** `freeze`. Jump = a timed
+  freeze that doesn't touch the option.
+- `glaze` — 6 grains over a 6 s rolling buffer. **params** `size`
+  [0.01..1] s, `density` `scatter` `spray` `motion`, `octave` [0..2], `feed`
+  `mix`.
+- `drivenet` — 4 lines at 1, √2, φ, √5 × `time`, folded, Householder-blended.
+  **params** `time` [1..500] ms, `feedback` [0..0.95], `damp` [300..16000],
+  `drive` `cross` `noise` `width` `mix`, `out` [-24..12].
+- `spectra` — FFT photograph (12 peaks) → robot (8-band vocoder + chest band,
+  carrier = 6 partials ring-modulated) + 12 allpass-stiffened combs. Counts
+  sixteenth steps in `onSchedule` (processors are clock units). **params**
+  `rate` [1..64] steps, `snap` `jump` [0..100], `thresh` [-90..-10] dB,
+  `decay` [0.1..10] s, `ring` `tight` `sink` `bloom` `feed` `grime` `damp`
+  `robo`, `oct` [0..6], `tilt` [-1..1], `width` `wash` `mix`. **options**
+  `photo` (`f:a,…` — saved; `now` takes one).
+- `lossyverb` — codec-style degradation + a tank requantised every pass.
+  **params** `kbps` [8..320], `pack` `verb` `spc` `tone` `duck` `width` `mix`.
+  **options** `freeze`.
+- `breathe` — LR4 3-band split, per-band compressor and keyed duck.
+  **params** `x_lo` [40..1000], `x_hi` [1000..10000], `thr` [-60..0],
+  `ratio` [1..20], `depth`, `attack` [0.1..100], `release` [10..2000],
+  `duck_lo` `duck_mid` `duck_hi`, `d_rel` [10..2000], `out` [-24..12], `key`
+  (a-rate sidechain, not randomisable).
+- `microdelay` — tuned comb, bandpass locked to harmonic `tone` of `tap`,
+  feedback opened in bursts on transients. **params** `tap` [1..100] ms, `fb`
+  [0..0.98], `stut` [0..100], `burst` [10..1000], `scat_l` `scat_r` `reso`,
+  `tone` [1..8], `crush` `level` `dry`.
+- `looper` — 30 s buffer; playhead optionally follows curves. **params**
+  `speed` [-4..4], `start` `length`, `xfade` [0..200], `ovr_fbk` `level`
+  `depth` `morph` `monitor`. **options** `rec` `play` (deferrable; `rec` is
+  never saved), `clear` (gesture), `curve_a` `curve_b` (point lists).
+- `oxide` — tape (pitch-shifting transport, wear model fitted to the manual's
+  timings, dropouts, hiss) + a dispersive two-spring tank; bit-exact bypass
+  when both off. **params** `spool` [0.02..1], `wear` [0.02..0.5], `wow`
+  `sat` `tone` `hiss`, `trim` [0..6], `spring_mix` `size` `color`.
+  **options** `tape` `disint` `spring`. `describeState()` = Time to
+  Degradation.
+
 ---
 
-## Modulators (8)
+## Modulators (18)
 
 A control source, never in a channel's chain — it exists to be patched
 somewhere. Two distinct shapes:
@@ -544,6 +707,60 @@ deliberately no second opt-out list.
   caveat that a gesture is a choice *among what currently exists*, so adding a
   track mid-take renumbers everything after it.
 
+
+### The AE machine's modulators (9) — `src/modulators/*.js`
+
+- `markovseq` (event generator) — 16 steps × 11 columns (options of 16
+  values: `trig` `note` `vel` `shift` `metrics` `ratchet` `ssize` `ratprob`
+  `swing` `prob` `micro`), a 16×16 `matrix` (`2|3|…`, 1-based, `.` empty;
+  `shape=` loads chain/returns/cells/wide/random/clear), self-rewriting
+  (`rewrite` `every` `density` `morph`), column animation (`animate`, `inject`
+  param), `weights` for trig injection, `dispatch` (gesture). Keeps its own
+  step cursor in beats (steps are irregular). Stamps events with `lane`,
+  `shift` (semitones), `noteNorm`, `step`. `shuffle(columns, coupled)` is
+  Terrarium's hook; injections call `fireFrom(name, time)` on every modulator
+  that has it (dicejumpers).
+- `elastictempo` (session-acting) — episodes as piecewise-linear bpm
+  envelopes in AudioContext time, applied with `clock.setBpm` each tick.
+  **params** `amt`, `epoch` [8..512] steps, `prob` `grid` [0..100], `len`
+  [0.25..3]. **options** `on`, `base_bpm`, `fire` (gesture), `seed`.
+- `dicejumpers` (session-acting) — **params** `dice` [0..100], `step_beats`.
+  **options** `targets` (default: every processor with `jump`), `probs`
+  (`name:%`), `listen` (markovseq names), `seed`. Tuning = the first
+  processor with `tuning()` (resonators) else `/harmony`.
+- `terrarium` (session-acting) — Lorenz (RK2, control rate) + agents
+  grabbing from the `canRandomize` pool of tracks (voices) and processors
+  (effects); releases restore the exact value unless `hold=on`. **params**
+  `rho` [0.5..60], `wanderers` [1..16], `depth`, `speed` [0.05..4],
+  `hold_min`/`hold_max` [10..8000] ms, `grab` `scramble` [0..100], `safety`,
+  `glide` [0..0.98], `balance`, `fx_wt`, `sh` [0..100]. **options** `mode`
+  (param, modulo), `hold`, `targets`, `shuffle` (a markovseq), `shuffle_cols`,
+  `coupled`, `seed`, `panic`/`reset` (gestures).
+- `driftbank` (session-acting) — **params** `rate` [0.05..4], `jump`
+  [0..100], `depth`. **options** `kind` (sends, pan), `bus`, `targets`,
+  `mode` (smooth, jump), `seed`. Ramps chained per lane from its last target.
+- `fbmatrix` (session-acting, *owns audio*) — taps each listed bus's output →
+  HP → LP → WaveShaper → DelayNode → gains into the other buses' inputs
+  (the DelayNode makes the cycles legal). Circulant routing blended by `rot`,
+  rows sum to 1, zero diagonal, `mute` cutout. **params** `depth` `rot`, `g`
+  [0..0.95], `drive`, `hp` [20..1000], `damp` [500..16000], `dtime`
+  [0.003..0.5], `mute` [0.1..2], `sec` [1..120]. **options** `buses`, `auto`,
+  `dice` (`now` deals, `off` returns to rot), `seed`.
+- `modlfo` (continuous, worklet) — **params** `hz` [0.01..40]. **options**
+  `shape` (sine, triangle, sawup, sawdown, square, sh, drift), `sync`, `div`
+  (4bar..1/16), `strike` (a track whose notes re-roll sh/drift).
+- `attractor` (continuous, worklet) — coullet / lorenz / rossler at audio
+  rate. **params** `rate` [0.001..1], `wander`. **options** `system`
+  `axis` `strike` (pushes the orbit's speed).
+- `curveloop` (continuous, worklet) — a drawn curve looped on `div` × `mult`,
+  beat-locked. **params** `rate` [0.125..4], `min` `max` [-1..1], `auto`
+  [0..100], `npoints` [2..32], `jump`. **options** `points`, `div`, `mult`,
+  `rnd`/`clr` (gestures). Redraws are written back to `points`.
+
+The worklet modulators (`RibbitWorkletModulator`, `src/dsp/modsource.js`)
+use `onSchedule` only to post beat anchors and strikes, and set
+`signalOutput = true` so hosts don't mistake them for session-acting ones.
+
 ---
 
 ## Groups
@@ -643,6 +860,14 @@ worklet, and the file to copy if a type ever needs one (e.g. a sample-accurate
 | modulates the session rather than one destination (needs no patch) | `randomgestures` (also the only user of the clock's `onSchedule` hook, and of the injected `engine`) |
 | reads a host-served library (manifest) | `percsampler`, `granular` (both via `src/samples.js`), `patternvariator` (`src/pattern.js`) |
 | needs a param with no natural `AudioParam` | any of the last three — all use `RibbitParamSources` (`src/param.js`) |
+| needs per-sample feedback, a moving nonlinearity, or DSP that keeps running (any new effect) | an AE worklet type: `cascade` (small), `notverb` (FDN), `oxide` (state + status posted back) — see `docs/dev/worklets.md` |
+| is a worklet voice | `fmperc` (smallest), `twostring` (per-voice state + compensation), `metalbass` (shared post-voice stage), `drone` (one persistent voice) |
+| is a synth that plays continuously and ignores notes | `tapedrone` (the `active` setter as gate), `slicer` (the same, relocated by notes) |
+| must decline some notes (a sieve, a family, a cluster) | any AE voice (`RibbitWorkletSynth.accepts`), `multicluster` (a shared seeded draw) |
+| takes a sidechain | `breathe` (an a-rate param patched from a track) |
+| is a continuous modulator locked to the beat | `modlfo`, `curveloop` (DSP.BeatClock anchors) |
+| owns audio routing between channels | `fbmatrix` |
+| decodes and analyses a sample on load | `slicer`/`multicluster` (`dsp/analysis.js`) |
 
 Step-by-step guides: `building-synths.md`, `building-processors.md`,
 `building-modulators.md`. Removing one: `removing-types.md`.

@@ -1,5 +1,16 @@
 # Synths and processors
 
+> **The AE machine's 36 types** — fifteen voices (`fmperc`, `modal`, `drone`,
+> `noisehat`, `subdrum`, `twostring`, `metalbass`, `crack`, `foldkick`,
+> `bassdrum`, `bigmodal`, `tapedrone`, `microsampler`, `slicer`,
+> `multicluster`), twelve effects (`deeppad`, `resonators`, `cascade`,
+> `notverb`, `glaze`, `drivenet`, `spectra`, `lossyverb`, `breathe`,
+> `microdelay`, `looper`, `oxide`) and nine modulators (`markovseq`,
+> `elastictempo`, `dicejumpers`, `terrarium`, `modlfo`, `driftbank`,
+> `attractor`, `fbmatrix`, `curveloop`) — have their own guide:
+> [ae-machine.md](ae-machine.md). `/<name> help` lists any object's params and
+> options.
+
 ## Synths (`synth=` on `/add_track` or a channel)
 
 > **"Not rampable" below never means "can't be scheduled."** Options can't be

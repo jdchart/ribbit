@@ -1,6 +1,6 @@
 import { scheduleRamp, setInstant, scheduleAt, RibbitAutomationEvent } from "./automation.js";
 import { RibbitEvent, formatEvents, parseEvents } from "./event.js";
-import { parseDegreeList } from "./harmony.js";
+import { parseDegreeList, parseTuning, formatTuning } from "./harmony.js";
 import { addressableParams } from "./param.js";
 import { normalizeMembers } from "./group.js";
 import { RECORDER_MODES, RECORDER_BIT_DEPTHS } from "./recorder.js";
@@ -1556,7 +1556,7 @@ const TOP_LEVEL_KEYWORDS = {
     add_track: ["name=", "synth=", "out="],
     add_bus: ["name=", "out="],
     clock: ["bpm=", "num_beats=", "at="],
-    harmony: ["root=", "scale=", "at="],
+    harmony: ["root=", "scale=", "tuning=", "period=", "at="],
     add_modulator: ["type=", "name="],
     add_group: ["name=", "members="],
     // min=/max= only mean anything alongside depth=random on an existing
@@ -1959,8 +1959,8 @@ export function createCommandRouter(ribbit) {
         // time, changing root/scale retunes already-playing degree-authored
         // patterns (and randomnotes streams) live, mid-loop.
         harmony: (params) => {
-            if (!("root" in params) && !("scale" in params)) {
-                return `root=${ribbit.harmony.root} scale=${ribbit.harmony.scale.join(",")}`;
+            if (!("root" in params) && !("scale" in params) && !("tuning" in params)) {
+                return `root=${ribbit.harmony.root} scale=${ribbit.harmony.scale.join(",")} tuning=${formatTuning(ribbit.harmony.tuning)}`;
             }
 
             const { warning, ...timing } = resolveStartTime(ribbit.clock, params.at);
@@ -1988,6 +1988,20 @@ export function createCommandRouter(ribbit) {
                     results.push(runAt(ribbit, timing, `scale=${scale.join(",")}`, () => {
                         ribbit.harmony.scale = scale;
                         return `scale=${ribbit.harmony.scale.join(",")}`;
+                    }));
+                }
+            }
+            // The microtonal tuning the `quant` voices snap to (a name, a
+            // cents list with period=, or off) — see harmony.js's TUNINGS.
+            // Degrees never read it, so this can't retune a degree pattern.
+            if ("tuning" in params) {
+                if (isRamp(params.tuning)) {
+                    results.push("tuning can't be ramped — use tuning=<name|cents list|off>");
+                } else {
+                    const tuning = parseTuning(params.tuning, params.period);
+                    results.push(runAt(ribbit, timing, `tuning=${formatTuning(tuning)}`, () => {
+                        ribbit.harmony.tuning = tuning;
+                        return `tuning=${formatTuning(ribbit.harmony.tuning)}`;
                     }));
                 }
             }

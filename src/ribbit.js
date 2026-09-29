@@ -10,6 +10,18 @@ import { RibbitLimiter } from "./processors/limiter.js";
 import { RibbitGoodenizer } from "./processors/goodenizer.js";
 import { RibbitSVF } from "./processors/svf.js";
 import { RibbitComb } from "./processors/comb.js";
+import { RibbitDeepPad } from "./processors/deeppad.js";
+import { RibbitResonators } from "./processors/resonators.js";
+import { RibbitCascade } from "./processors/cascade.js";
+import { RibbitNotverb } from "./processors/notverb.js";
+import { RibbitGlaze } from "./processors/glaze.js";
+import { RibbitDriveNet } from "./processors/drivenet.js";
+import { RibbitSpectra } from "./processors/spectra.js";
+import { RibbitLossyVerb } from "./processors/lossyverb.js";
+import { RibbitBreathe } from "./processors/breathe.js";
+import { RibbitMicroDelay } from "./processors/microdelay.js";
+import { RibbitLooper } from "./processors/looper.js";
+import { RibbitOxide } from "./processors/oxide.js";
 import { RibbitOscSynth } from "./synths/oscsynth.js";
 import { RibbitSampler } from "./synths/sampler.js";
 import { RibbitPercSampler } from "./synths/percsampler.js";
@@ -18,6 +30,21 @@ import { RibbitGranular } from "./synths/granular.js";
 import { RibbitTapePad } from "./synths/tapepad.js";
 import { RibbitChaosSynth } from "./synths/chaossynth.js";
 import { RibbitCZSynth } from "./synths/czsynth.js";
+import { RibbitFMPerc } from "./synths/fmperc.js";
+import { RibbitModal } from "./synths/modal.js";
+import { RibbitDrone } from "./synths/drone.js";
+import { RibbitNoiseHat } from "./synths/noisehat.js";
+import { RibbitSubDrum } from "./synths/subdrum.js";
+import { RibbitTwoString } from "./synths/twostring.js";
+import { RibbitMetalBass } from "./synths/metalbass.js";
+import { RibbitCrack } from "./synths/crack.js";
+import { RibbitFoldKick } from "./synths/foldkick.js";
+import { RibbitBassDrum } from "./synths/bassdrum.js";
+import { RibbitBigModal } from "./synths/bigmodal.js";
+import { RibbitTapeDrone } from "./synths/tapedrone.js";
+import { RibbitMicroSampler } from "./synths/microsampler.js";
+import { RibbitSlicer } from "./synths/slicer.js";
+import { RibbitMultiCluster } from "./synths/multicluster.js";
 import { RibbitLFO } from "./modulators/lfo.js";
 import { RibbitRandomNotes } from "./modulators/randomnotes.js";
 import { RibbitCV } from "./modulators/cv.js";
@@ -27,6 +54,15 @@ import { RibbitPatternVariator } from "./modulators/patternvariator.js";
 import { RibbitChorale } from "./modulators/chorale.js";
 import { RibbitRandomGestures } from "./modulators/randomgestures.js";
 import { RibbitPianoRoll } from "./modulators/pianoroll.js";
+import { RibbitMarkovSeq } from "./modulators/markovseq.js";
+import { RibbitElasticTempo } from "./modulators/elastictempo.js";
+import { RibbitDiceJumpers } from "./modulators/dicejumpers.js";
+import { RibbitTerrarium } from "./modulators/terrarium.js";
+import { RibbitModLFO } from "./modulators/modlfo.js";
+import { RibbitDriftBank } from "./modulators/driftbank.js";
+import { RibbitAttractor } from "./modulators/attractor.js";
+import { RibbitFBMatrix } from "./modulators/fbmatrix.js";
+import { RibbitCurveLoop } from "./modulators/curveloop.js";
 import { RibbitPatch, RibbitEventPatch } from "./patch.js";
 import { RibbitGroup } from "./group.js";
 import { RibbitRecorder } from "./recorder.js";
@@ -50,6 +86,21 @@ const PROCESSOR_TYPES = {
     // A composite of the four above rather than a sixth implementation —
     // see processors/goodenizer.js.
     goodenizer: RibbitGoodenizer,
+    // The AE machine's effects (docs/dev/ae-machine.md), AudioWorklet DSP.
+    // Mostly send-bus effects; deeppad plays itself and treats its input as
+    // excitation, looper/oxide sit on a loop bus.
+    deeppad: RibbitDeepPad,
+    resonators: RibbitResonators,
+    cascade: RibbitCascade,
+    notverb: RibbitNotverb,
+    glaze: RibbitGlaze,
+    drivenet: RibbitDriveNet,
+    spectra: RibbitSpectra,
+    lossyverb: RibbitLossyVerb,
+    breathe: RibbitBreathe,
+    microdelay: RibbitMicroDelay,
+    looper: RibbitLooper,
+    oxide: RibbitOxide,
 };
 
 const SYNTH_TYPES = {
@@ -61,6 +112,23 @@ const SYNTH_TYPES = {
     tapepad: RibbitTapePad,
     chaossynth: RibbitChaosSynth,
     czsynth: RibbitCZSynth,
+    // The AE machine's voices (docs/dev/ae-machine.md): AudioWorklet DSP
+    // (dsp/), each with a lane and a sieve for markovseq's orchestration.
+    fmperc: RibbitFMPerc,
+    modal: RibbitModal,
+    drone: RibbitDrone,
+    noisehat: RibbitNoiseHat,
+    subdrum: RibbitSubDrum,
+    twostring: RibbitTwoString,
+    metalbass: RibbitMetalBass,
+    crack: RibbitCrack,
+    foldkick: RibbitFoldKick,
+    bassdrum: RibbitBassDrum,
+    bigmodal: RibbitBigModal,
+    tapedrone: RibbitTapeDrone,
+    microsampler: RibbitMicroSampler,
+    slicer: RibbitSlicer,
+    multicluster: RibbitMultiCluster,
 };
 
 const MODULATOR_TYPES = {
@@ -73,6 +141,16 @@ const MODULATOR_TYPES = {
     chorale: RibbitChorale,
     randomgestures: RibbitRandomGestures,
     pianoroll: RibbitPianoRoll,
+    // The AE machine's brain and weather (docs/dev/ae-machine.md).
+    markovseq: RibbitMarkovSeq,
+    elastictempo: RibbitElasticTempo,
+    dicejumpers: RibbitDiceJumpers,
+    terrarium: RibbitTerrarium,
+    modlfo: RibbitModLFO,
+    driftbank: RibbitDriftBank,
+    attractor: RibbitAttractor,
+    fbmatrix: RibbitFBMatrix,
+    curveloop: RibbitCurveLoop,
 };
 
 // Every name the console router dispatches before it ever looks at objects:
